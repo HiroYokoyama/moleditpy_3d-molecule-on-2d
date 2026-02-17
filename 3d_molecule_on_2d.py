@@ -43,10 +43,20 @@ def initialize(context):
     mw = context.get_main_window()
     _rotate_tool_handler = RotateToolHandler(mw)
     
-    # --- Action Callbacks ---
-    
     def on_rotate_toggled(checked):
-        _rotate_tool_handler.set_active(checked)
+        if checked:
+            # Ensure other tools in the group are unchecked
+            if hasattr(mw, "tool_group"):
+                for act in mw.tool_group.actions():
+                    if act.text() != "Rotate 3D" and act.isChecked():
+                        act.setChecked(False)
+            _rotate_tool_handler.set_active(True)
+        else:
+            _rotate_tool_handler.set_active(False)
+            # Default back to select mode if we are turning off rotation
+            if hasattr(mw, "mode_actions") and "select" in mw.mode_actions:
+                mw.mode_actions["select"].setChecked(True)
+                mw.set_mode("select")
 
     def on_cleanup_triggered():
         global _show_depth_cues
@@ -326,14 +336,32 @@ def toggle_monkey_patches(active):
                     self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
                 BondItem.__init__ = bond_init_fix
             
-            # Also patch setFlag itself to ignore ItemIsMovable for bonds
+            # Also patch setFlag and setFlags to ignore ItemIsMovable for bonds
             if not hasattr(BondItem, "_original_setFlag"):
                 BondItem._original_setFlag = BondItem.setFlag
                 def bond_set_flag_guarded(self, flag, enabled=True):
                     if flag == QGraphicsItem.GraphicsItemFlag.ItemIsMovable and enabled:
+                        # Force disable movement even if requested
+                        BondItem._original_setFlag(self, flag, False)
                         return
                     BondItem._original_setFlag(self, flag, enabled)
                 BondItem.setFlag = bond_set_flag_guarded
+
+            if not hasattr(BondItem, "_original_setFlags"):
+                BondItem._original_setFlags = BondItem.setFlags
+                def bond_set_flags_guarded(self, flags):
+                    # Mask out ItemIsMovable
+                    safe_flags = flags & ~QGraphicsItem.GraphicsItemFlag.ItemIsMovable
+                    BondItem._original_setFlags(self, safe_flags)
+                BondItem.setFlags = bond_set_flags_guarded
+
+            # Final guard: Override flags() to always return non-movable
+            if not hasattr(BondItem, "_original_flags"):
+                BondItem._original_flags = BondItem.flags
+                def bond_flags_guarded(self):
+                    f = BondItem._original_flags(self)
+                    return f & ~QGraphicsItem.GraphicsItemFlag.ItemIsMovable
+                BondItem.flags = bond_flags_guarded
     else:
         if _original_atom_paint is not None:
             AtomItem.paint = _original_atom_paint
