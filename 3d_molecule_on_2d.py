@@ -309,9 +309,11 @@ def enable_plugin(mw, context):
     configure_actions()
     
     # Ensure actions are in the toolbar (they might have been removed by disable_plugin)
-    for act in _toolbar_actions_objs:
-        if act not in tb.actions():
-            tb.addAction(act)
+    if _toolbar_actions_objs:
+        tb.show()
+        for act in _toolbar_actions_objs:
+            if act not in tb.actions():
+                tb.addAction(act)
     
     if mw.scene:
         mw.scene.update()
@@ -327,6 +329,10 @@ def disable_plugin(mw):
     if tb:
         for act in _toolbar_actions_objs:
             tb.removeAction(act)
+        # If toolbar is now essentially empty (only our actions were removed), hide it
+        # Note: tb.actions() might still have separators or other plugins' actions
+        if not any(not a.isSeparator() for a in tb.actions()):
+            tb.hide()
     
     if mw.scene:
         mw.scene.update()
@@ -338,7 +344,7 @@ def configure_actions():
     if not tb: return
     
     # Filter for our actions in the toolbar
-    found_actions = [a for a in tb.actions() if a.text() in ["Clean Up 3D", "Rotate 3D", "3D on 2D Detail Settings..."]]
+    found_actions = [a for a in tb.actions() if a.text() in ["Clean Up 3D", "Rotate 3D", "3D on 2D Settings..."]]
     
     # Only update our global list if we found them (to avoid clearing it when plugin is disabled)
     if found_actions:
@@ -349,7 +355,7 @@ def configure_actions():
 
     rotate_act = next((a for a in actions if a.text() == "Rotate 3D"), None)
     cleanup_act = next((a for a in actions if a.text() == "Clean Up 3D"), None)
-    settings_act = next((a for a in actions if a.text() == "3D on 2D Detail Settings..."), None)
+    settings_act = next((a for a in actions if a.text() == "3D on 2D Settings..."), None)
     
     # Set Checkable and connect toggled
     if rotate_act:
