@@ -25,7 +25,7 @@ _enabled = True
 _show_depth_cues = True
 _rotate_tool_handler = None
 _depth_cue_strength = 0.8  # 0.0 to 1.0
-_3d_scale = 45.0           # Default is 1.5x of previous 30.0
+_3d_scale = 50.0           # Matches ANGSTROM_PER_PIXEL (0.02) exactly
 _mw = None
 _context = None
 _settings_file = os.path.splitext(os.path.abspath(__file__))[0] + ".json"
@@ -33,7 +33,9 @@ _settings_file = os.path.splitext(os.path.abspath(__file__))[0] + ".json"
 # Store original paint methods
 _original_atom_paint = None
 _original_bond_paint = None
+_original_save_as_mol = None
 _toolbar_actions_objs = []
+_export_in_progress = False
 
 def blend_with_white(color, factor):
     """Linearly interpolate color towards white."""
@@ -87,67 +89,31 @@ def save_settings():
     except Exception as e:
         print(f"[{PLUGIN_NAME}] Error saving settings: {e}")
 
-def on_cleanup_triggered():
-    global _show_depth_cues, _mw
+def on_cleanup_triggered(*args, **kwargs):
+    # Safety: We NEVER call mw.trigger_conversion() here anymore to avoid modifying 
+    # the user's saved 3D coordinates. We just sync to what exists.
+    # Note: args[0] may be a bool (checked state) if called from QAction.triggered
+    global _mw
     mw = _mw
     if not mw: return
     mol = mw.current_mol
-    
-    all_atoms = [i for i in mw.scene.items() if type(i).__name__ == "AtomItem" and not sip_isdeleted_safe(i)]
-    if not all_atoms: return
+    if not mol: return
 
-    # Check if RDKit mol has 3D data
     has_3d_conf = mol and mol.GetNumConformers() > 0
-    
-    # Check if all atoms in scene have mapping to RDKit mol
-    mapped_oids = set()
-    if mol:
-        for a in mol.GetAtoms():
-            try:
-                if a.HasProp("_original_atom_id"): mapped_oids.add(a.GetIntProp("_original_atom_id"))
-                elif a.HasProp("original_id"): mapped_oids.add(a.GetIntProp("original_id"))
-            except: pass
-    
-    scene_oids = {a.atom_id for a in all_atoms}
-    # Check bonds
-    scene_bonds = set()
-    for b in mw.scene.items():
-        if type(b).__name__ == "BondItem" and not sip_isdeleted_safe(b):
-            id1, id2 = b.atom1.atom_id, b.atom2.atom_id
-            scene_bonds.add(tuple(sorted((id1, id2))))
-    
-    mol_bonds = set()
-    if mol:
-        for b in mol.GetBonds():
-            a1, a2 = b.GetBeginAtom(), b.GetEndAtom()
-            id1 = id2 = None
-            try: id1 = a1.GetIntProp("_original_atom_id") if a1.HasProp("_original_atom_id") else (int(a1.GetProp("original_id")) if a1.HasProp("original_id") else None)
-            except: pass
-            try: id2 = a2.GetIntProp("_original_atom_id") if a2.HasProp("_original_atom_id") else (int(a2.GetProp("original_id")) if a2.HasProp("original_id") else None)
-            except: pass
-            if id1 is not None and id2 is not None:
-                mol_bonds.add(tuple(sorted((id1, id2))))
-
-    # If all atoms and bonds in scene are mapped to the current RDKit model, we don't need re-conversion
-    all_mapped = scene_oids.issubset(mapped_oids) and (scene_bonds == mol_bonds) and len(scene_oids) > 0
-    
-    # Check if the conformer is effectively 2D (flat)
-    is_flat = True
     if has_3d_conf:
+        # Check if the conformer is effectively 2D (flat)
+        is_flat = True
         conf = mol.GetConformer()
         zs = [conf.GetAtomPosition(i).z for i in range(mol.GetNumAtoms())]
         if zs and (max(zs) - min(zs)) > 1e-4:
             is_flat = False
-
-    if not (has_3d_conf and all_mapped) or is_flat:
-        mw.statusBar().showMessage("Regenerating 3D coordinates...")
-        mw.trigger_conversion()
-        # Wait for conversion to complete
-        QTimer.singleShot(1100, lambda: sync_to_3d_layout(mw, mw.current_mol))
-    else:
-        # Already have 3D data, just sync positions (restores 3D shape and Z)
-        mw.statusBar().showMessage("Syncing layout to 3D...")
+            
+        mw.statusBar().showMessage("Syncing layout to existing 3D data...")
         sync_to_3d_layout(mw, mol)
+        if is_flat:
+             mw.statusBar().showMessage("Note: Source is 2D (flat). Layout synced to Z=0.")
+    else:
+        mw.statusBar().showMessage("No 3D data available. Use main Conversion tool first.")
     
     # Force bonds to be non-movable again just in case
     for item in mw.scene.items():
@@ -156,7 +122,7 @@ def on_cleanup_triggered():
     
     mw.scene.update()
 
-def show_settings_dialog():
+def show_settings_dialog(*args, **kwargs):
     global _depth_cue_strength, _3d_scale, _mw
     mw = _mw
     if not mw: return
@@ -214,25 +180,6 @@ def show_settings_dialog():
                 if hasattr(bond.atom1, "z_3d") and hasattr(bond.atom2, "z_3d"):
                     bond.setZValue((bond.atom1.z_3d + bond.atom2.z_3d) / 2.0)
             
-            # Sync back to RDKit conformer if it exists
-            mol = mw.current_mol
-            if mol and mol.GetNumConformers() > 0:
-                conf = mol.GetConformer()
-                aid_to_idx = {}
-                for i in range(mol.GetNumAtoms()):
-                    atom_rd = mol.GetAtomWithIdx(i)
-                    if atom_rd.HasProp("_original_atom_id"):
-                        try: aid_to_idx[atom_rd.GetIntProp("_original_atom_id")] = i
-                        except: pass
-                
-                for mol_atoms in molecules:
-                    for atom_item in mol_atoms:
-                        aid = atom_item.atom_id
-                        if aid in aid_to_idx:
-                            idx = aid_to_idx[aid]
-                            pos = atom_item.pos()
-                            conf.SetAtomPosition(idx, Point3D(pos.x() / _3d_scale, -pos.y() / _3d_scale, atom_item.z_3d / _3d_scale))
-
             update_molecule_z_ranges(mw.scene)
             mw.scene.update()
     scale_slider.valueChanged.connect(on_scale_changed)
@@ -469,7 +416,7 @@ def load_state(data):
     if not mw: return
     if data:
         _depth_cue_strength = data.get("depth_cue_strength", 0.8)
-        _3d_scale = data.get("3d_scale", 45.0)
+        _3d_scale = data.get("3d_scale", 50.0)
         
         # If the file has 3D data, we temporary enable the plugin if it's currently disabled.
         has_3d_data = "z_data" in data and len(data["z_data"]) > 0
@@ -484,15 +431,27 @@ def load_state(data):
             for aid_str, z in z_map.items():
                 try:
                     aid = int(aid_str)
-                    atom_data = mw.scene.data.atoms.get(aid)
+                    # Robust lookup: Try data dict first
+                    atom_data = None
+                    if hasattr(mw.scene, 'data') and mw.scene.data:
+                        atom_data = mw.scene.data.atoms.get(aid)
+                    
+                    item = None
                     if atom_data and 'item' in atom_data:
                         item = atom_data['item']
-                        if item and not sip_isdeleted_safe(item):
-                            # Re-scale based on the current _3d_scale
-                            item.z_3d = z * _3d_scale
-                            # White is back: Higher Z is closer
-                            item.setZValue(item.z_3d)
-                except ValueError: continue
+                    else:
+                        # Fallback: Search the scene for an AtomItem with this ID
+                        for i in mw.scene.items():
+                            if type(i).__name__ == "AtomItem" and getattr(i, "atom_id", None) == aid:
+                                item = i
+                                break
+                    
+                    if item and not sip_isdeleted_safe(item):
+                        # Re-scale based on the current _3d_scale
+                        item.z_3d = z * _3d_scale
+                        # White is back: Higher Z is closer
+                        item.setZValue(item.z_3d)
+                except Exception: continue
 
     # Ensure Z coordinates are present (either from z_data or the RDKit molecule)
     def finalized_restore():
@@ -581,36 +540,65 @@ def toggle_monkey_patches(active, mw=None):
             BondItem.paint = _original_bond_paint
             _original_bond_paint = None
 
+def patched_to_rdkit_mol(self, use_2d_stereo=True):
+    mol = self._original_to_rdkit_mol(use_2d_stereo)
+    # Only apply Z/XYZ overrides if an export is explicitly in progress
+    if _export_in_progress and mol and mol.GetNumConformers() > 0:
+        conf = mol.GetConformer()
+        conf.Set3D(True)
+        # Use the plugin's _3d_scale to accurately convert back to angstroms
+        scale = _3d_scale if abs(_3d_scale) > 1e-4 else 50.0
+        for i in range(mol.GetNumAtoms()):
+            atom_rd = mol.GetAtomWithIdx(i)
+            if atom_rd.HasProp("_original_atom_id"):
+                aid = atom_rd.GetIntProp("_original_atom_id")
+                if aid in self.atoms:
+                    item = self.atoms[aid].get("item")
+                    if item and not sip_isdeleted_safe(item) and hasattr(item, "z_3d"):
+                        # Use current visual position (including rotation) for all coordinates
+                        pos_item = item.pos()
+                        ax = pos_item.x() / scale
+                        ay = -pos_item.y() / scale
+                        az = item.z_3d / scale
+                        conf.SetAtomPosition(i, Point3D(ax, ay, az))
+    return mol
+
+def patched_save_as_mol(self, *args, **kwargs):
+    global _export_in_progress
+    from moleditpy.modules.main_window_molecular_parsers import MainWindowMolecularParsers
+    _export_in_progress = True
+    try:
+        if hasattr(MainWindowMolecularParsers, "_original_save_as_mol") and MainWindowMolecularParsers._original_save_as_mol:
+             return MainWindowMolecularParsers._original_save_as_mol(self, *args, **kwargs)
+        return self.save_as_mol(*args, **kwargs) # Fallback (should not happen if patched)
+    finally:
+        _export_in_progress = False
+
 def patch_export_logic(active=True):
-    """Monkey patch MolecularData to include Z coordinate in Mol exports."""
+    """Monkey patch MolecularData and Parsers for 3D-aware Mol export."""
     from moleditpy.modules.molecular_data import MolecularData
-    from moleditpy.modules.constants import ANGSTROM_PER_PIXEL
+    from moleditpy.modules.main_window_molecular_parsers import MainWindowMolecularParsers
     
     if active:
-        if hasattr(MolecularData, "_original_to_rdkit_mol"): return
-        MolecularData._original_to_rdkit_mol = MolecularData.to_rdkit_mol
-
-        def patched_to_rdkit_mol(self, use_2d_stereo=True):
-            mol = self._original_to_rdkit_mol(use_2d_stereo)
-            if mol and mol.GetNumConformers() > 0:
-                conf = mol.GetConformer()
-                for i in range(mol.GetNumAtoms()):
-                    atom_rd = mol.GetAtomWithIdx(i)
-                    if atom_rd.HasProp("_original_atom_id"):
-                        aid = atom_rd.GetIntProp("_original_atom_id")
-                        if aid in self.atoms:
-                            item = self.atoms[aid].get("item")
-                            if item and not sip_isdeleted_safe(item) and hasattr(item, "z_3d"):
-                                # Update Z in conformer
-                                pos = conf.GetAtomPosition(i)
-                                conf.SetAtomPosition(i, Point3D(pos.x, pos.y, item.z_3d * ANGSTROM_PER_PIXEL))
-            return mol
-        
-        MolecularData.to_rdkit_mol = patched_to_rdkit_mol
+        # Patch to_rdkit_mol (data layer)
+        if not hasattr(MolecularData, "_original_to_rdkit_mol"):
+            MolecularData._original_to_rdkit_mol = MolecularData.to_rdkit_mol
+            MolecularData.to_rdkit_mol = patched_to_rdkit_mol
+            
+        # Patch save_as_mol (UI/Export layer) to trigger the flag
+        if not hasattr(MainWindowMolecularParsers, "_original_save_as_mol"):
+            MainWindowMolecularParsers._original_save_as_mol = MainWindowMolecularParsers.save_as_mol
+            MainWindowMolecularParsers.save_as_mol = patched_save_as_mol
     else:
+        # Restore to_rdkit_mol
         if hasattr(MolecularData, "_original_to_rdkit_mol"):
             MolecularData.to_rdkit_mol = MolecularData._original_to_rdkit_mol
             delattr(MolecularData, "_original_to_rdkit_mol")
+            
+        # Restore save_as_mol
+        if hasattr(MainWindowMolecularParsers, "_original_save_as_mol"):
+            MainWindowMolecularParsers.save_as_mol = MainWindowMolecularParsers._original_save_as_mol
+            delattr(MainWindowMolecularParsers, "_original_save_as_mol")
 
 # --- Patched Paint Methods ---
 
@@ -968,26 +956,6 @@ class RotateToolHandler(QObject):
             if hasattr(bond.atom1, "z_3d") and hasattr(bond.atom2, "z_3d"):
                 bond.setZValue((bond.atom1.z_3d + bond.atom2.z_3d) / 2.0)
                 
-        # 7. Sync back to RDKit conformer for persistence and undo/redo
-        mol = self.mw.current_mol
-        if mol and mol.GetNumConformers() > 0:
-            conf = mol.GetConformer()
-            # Build mapping aid -> idx
-            aid_to_idx = {}
-            for i in range(mol.GetNumAtoms()):
-                atom_rd = mol.GetAtomWithIdx(i)
-                if atom_rd.HasProp("_original_atom_id"):
-                    try: aid_to_idx[atom_rd.GetIntProp("_original_atom_id")] = i
-                    except: pass
-            
-            for atom_item in self.target_atoms:
-                aid = atom_item.atom_id
-                if aid in aid_to_idx:
-                    idx = aid_to_idx[aid]
-                    pos = atom_item.pos()
-                    # Map back from screen to RDKit (divide by scale, flip Y)
-                    conf.SetAtomPosition(idx, Point3D(pos.x() / _3d_scale, -pos.y() / _3d_scale, atom_item.z_3d / _3d_scale))
-
         update_molecule_z_ranges(self.mw.scene)
         self.mw.scene.update()
 
