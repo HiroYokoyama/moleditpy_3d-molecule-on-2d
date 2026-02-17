@@ -140,15 +140,13 @@ def on_cleanup_triggered():
             is_flat = False
 
     if not (has_3d_conf and all_mapped) or is_flat:
-        # Missing 3D data, mapping mismatch, or flat conformer
-        reason = "Flat conformer" if is_flat and has_3d_conf else "Missing/Unmapped 3D data"
-        mw.statusBar().showMessage(f"Generating 3D coordinates ({reason})...")
+        mw.statusBar().showMessage("Regenerating 3D coordinates...")
         mw.trigger_conversion()
         # Wait for conversion to complete
         QTimer.singleShot(1100, lambda: sync_to_3d_layout(mw, mw.current_mol))
     else:
-        # We have 3D data and mapping, just sync positions
-        mw.statusBar().showMessage("Syncing structure to existing 3D data...")
+        # Already have 3D data, just sync positions (restores 3D shape and Z)
+        mw.statusBar().showMessage("Syncing layout to 3D...")
         sync_to_3d_layout(mw, mol)
     
     # Force bonds to be non-movable again just in case
@@ -766,40 +764,34 @@ def sync_to_3d_layout(mw, mol):
         if oid is not None:
             proj_coords[oid] = (p.x * scale, -p.y * scale, p.z * scale)
 
-    # 2. Find molecules in scene and identify item->oid mapping
+    # 2. Find molecules in scene
     molecules, all_atoms, all_bonds = find_molecules(mw.scene)
-    item_to_oid = {}
-    if hasattr(mw.scene, 'data'):
-        for oid, atom_data in mw.scene.data.atoms.items():
-            item = atom_data.get('item')
-            if item: item_to_oid[item] = oid
-
+    
     # 3. Targeted Sync based on selection
     selected_items = mw.scene.selectedItems()
     target_mol_indices = []
     
     if selected_items:
         for i, mol_atoms in enumerate(molecules):
-            # Check if any atom of this molecule is selected
             if any(a.isSelected() for a in mol_atoms):
                 target_mol_indices.append(i)
                 continue
-            # Check if any bond of this molecule is selected
             for bond in all_bonds:
                 if bond.isSelected() and (bond.atom1 in mol_atoms or bond.atom2 in mol_atoms):
                     target_mol_indices.append(i)
                     break
     
-    # 3. Sync target molecules
+    # 4. Sync target molecules
     for i, mol_atoms in enumerate(molecules):
         if selected_items and i not in target_mol_indices:
             continue
             
         mapped_data = [] # List of (atom_item, px, py, pz)
         for a in mol_atoms:
-            oid = item_to_oid.get(a)
-            if oid in proj_coords:
-                mapped_data.append((a, *proj_coords[oid]))
+            # ROBUST MAPPING: Use a.atom_id directly
+            aid = getattr(a, "atom_id", None)
+            if aid in proj_coords:
+                mapped_data.append((a, *proj_coords[aid]))
         
         if not mapped_data: continue
         
@@ -818,11 +810,9 @@ def sync_to_3d_layout(mw, mol):
             atom_item.z_3d = pz
             atom_item.setZValue(pz)
 
-    # 4. Update ALL bonds (ensure position and ZValue) and Z-ranges
+    # 5. Update ALL bonds (ensure position and ZValue) and Z-ranges
     for bond in all_bonds:
-        # Fix: Ensure bonds are NOT movable
         bond.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
-        
         if hasattr(bond, "update_position"):
             bond.update_position()
         if hasattr(bond.atom1, "z_3d") and hasattr(bond.atom2, "z_3d"):
