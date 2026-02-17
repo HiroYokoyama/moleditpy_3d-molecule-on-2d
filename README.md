@@ -45,7 +45,3 @@ This plugin enhances MoleditPy with integrated 3D depth cues, interactive 3D rot
 - **Monkey Patching**: The plugin non-destructively patches `AtomItem` and `BondItem` paint methods and the `MolecularData` export logic.
 - **Z-Coord Persistence**: Z-coordinates are stored as part of the plugin state and restored across sessions.
 - **RDKit Integration**: Uses RDKit for 3D coordinate generation and Mol block handling.
-
----
-**Author**: HiroYokoyama  
-**Version**: 1.0.0
