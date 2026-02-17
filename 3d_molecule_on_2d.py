@@ -14,15 +14,16 @@ from PyQt6.QtGui import QColor, QPen, QIcon, QAction, QActionGroup, QPainter, QB
 
 # Metadata
 PLUGIN_NAME = "3D Molecule on 2D"
-PLUGIN_VERSION = "0.0.0"
+PLUGIN_VERSION = "1.0.0"
 PLUGIN_AUTHOR = "HiroYokoyama"
-PLUGIN_DESCRIPTION = "Integrated 3D depth cues and rotation."
+PLUGIN_DESCRIPTION = "Integrated 3D depth cues, rotation, and 3D-aware Mol export."
 
 # Global state
 _show_depth_cues = True
 _rotate_tool_handler = None
 _depth_cue_strength = 0.8  # 0.0 to 1.0
 _3d_scale = 45.0           # Default is 1.5x of previous 30.0
+_mw = None
 
 # Store original paint methods
 _original_atom_paint = None
@@ -38,9 +39,10 @@ def blend_with_white(color, factor):
     return QColor(r, g, b)
 
 def initialize(context):
-    global _rotate_tool_handler, _original_atom_paint, _original_bond_paint
+    global _rotate_tool_handler, _original_atom_paint, _original_bond_paint, _mw
     
     mw = context.get_main_window()
+    _mw = mw
     _rotate_tool_handler = RotateToolHandler(mw)
     
     def on_rotate_toggled(checked):
@@ -59,7 +61,8 @@ def initialize(context):
                 mw.set_mode("select")
 
     def on_cleanup_triggered():
-        global _show_depth_cues
+        global _show_depth_cues, _mw
+        mw = _mw
         mol = mw.current_mol
         
         all_atoms = [i for i in mw.scene.items() if type(i).__name__ == "AtomItem" and not sip_isdeleted_safe(i)]
@@ -78,19 +81,38 @@ def initialize(context):
                 except: pass
         
         scene_oids = {a.atom_id for a in all_atoms}
-        # If all scene atoms are mapped to the current RDKit model, we don't need re-conversion
-        all_mapped = scene_oids.issubset(mapped_oids) and len(scene_oids) > 0
+        # Check bonds
+        scene_bonds = set()
+        for b in mw.scene.items():
+            if type(b).__name__ == "BondItem" and not sip_isdeleted_safe(b):
+                id1, id2 = b.atom1.atom_id, b.atom2.atom_id
+                scene_bonds.add(tuple(sorted((id1, id2))))
         
-        if has_3d_conf and all_mapped:
-            # We have 3D data and mapping, just sync positions
-            mw.statusBar().showMessage("Syncing 2D layout to existing 3D data...")
-            sync_to_3d_layout(mw, mol)
-        else:
+        mol_bonds = set()
+        if mol:
+            for b in mol.GetBonds():
+                a1, a2 = b.GetBeginAtom(), b.GetEndAtom()
+                id1 = id2 = None
+                try: id1 = a1.GetIntProp("_original_atom_id") if a1.HasProp("_original_atom_id") else (int(a1.GetProp("original_id")) if a1.HasProp("original_id") else None)
+                except: pass
+                try: id2 = a2.GetIntProp("_original_atom_id") if a2.HasProp("_original_atom_id") else (int(a2.GetProp("original_id")) if a2.HasProp("original_id") else None)
+                except: pass
+                if id1 is not None and id2 is not None:
+                    mol_bonds.add(tuple(sorted((id1, id2))))
+
+        # If all atoms and bonds in scene are mapped to the current RDKit model, we don't need re-conversion
+        all_mapped = scene_oids.issubset(mapped_oids) and (scene_bonds == mol_bonds) and len(scene_oids) > 0
+        
+        if not (has_3d_conf and all_mapped):
             # Missing 3D data or new atoms added that aren't in the model yet
             mw.statusBar().showMessage("Generating 3D coordinates...")
             mw.trigger_conversion()
-            # Wait for conversion to complete (conversion uses a thread internally usually)
+            # Wait for conversion to complete
             QTimer.singleShot(1100, lambda: sync_to_3d_layout(mw, mw.current_mol))
+        else:
+            # We have 3D data and mapping, just sync positions
+            mw.statusBar().showMessage("Syncing structure to existing 3D data...")
+            sync_to_3d_layout(mw, mol)
         
         # Force bonds to be non-movable again just in case
         for item in mw.scene.items():
@@ -100,7 +122,8 @@ def initialize(context):
         mw.scene.update()
 
     def show_settings_dialog():
-        global _depth_cue_strength
+        global _depth_cue_strength, _mw
+        mw = _mw
         dlg = QDialog(mw)
         dlg.setWindowTitle("Depth Cue Settings")
         layout = QVBoxLayout(dlg)
@@ -187,8 +210,8 @@ def initialize(context):
 
     # --- Standard Registration ---
     
-    context.add_toolbar_action(lambda: None, "Rotate 3D", tooltip="Rotate molecule in 3D")
     context.add_toolbar_action(on_cleanup_triggered, "Clean Up 3D", tooltip="Sync 2D layout to 3D")
+    context.add_toolbar_action(lambda: None, "Rotate 3D", tooltip="Rotate molecule in 3D")
     context.add_toolbar_action(show_settings_dialog, "3D on 2D Setting", tooltip="Settings")
     
     # --- Post-Processing (Refine toolbar UI) ---
@@ -224,6 +247,8 @@ def initialize(context):
     
     # --- Undo/Redo Sync ---
     def on_undo_redo_changed():
+        global _mw
+        mw = _mw
         # Delay slightly to allow the scene to update its items
         def run_restore():
             if _rotate_tool_handler:
@@ -270,6 +295,8 @@ def initialize(context):
 
     # Persistence
     def save_state():
+        global _mw
+        mw = _mw
         state = {
             "depth_cue_strength": _depth_cue_strength,
             "3d_scale": _3d_scale
@@ -285,7 +312,8 @@ def initialize(context):
         return state
 
     def load_state(data):
-        global _depth_cue_strength, _3d_scale
+        global _depth_cue_strength, _3d_scale, _mw
+        mw = _mw
         if data:
             _depth_cue_strength = data.get("depth_cue_strength", 0.8)
             _3d_scale = data.get("3d_scale", 45.0)
@@ -328,9 +356,10 @@ def initialize(context):
     context.register_load_handler(load_state)
 
     # Initial patches
-    toggle_monkey_patches(True)
+    toggle_monkey_patches(True, mw)
+    patch_export_logic()
 
-def toggle_monkey_patches(active):
+def toggle_monkey_patches(active, mw=None):
     from moleditpy.modules.atom_item import AtomItem
     from moleditpy.modules.bond_item import BondItem
     global _original_atom_paint, _original_bond_paint, _show_depth_cues
@@ -362,7 +391,7 @@ def toggle_monkey_patches(active):
                         return
                     BondItem._original_setFlag(self, flag, enabled)
                 BondItem.setFlag = bond_set_flag_guarded
-
+ 
             if not hasattr(BondItem, "_original_setFlags"):
                 BondItem._original_setFlags = BondItem.setFlags
                 def bond_set_flags_guarded(self, flags):
@@ -370,7 +399,7 @@ def toggle_monkey_patches(active):
                     safe_flags = flags & ~QGraphicsItem.GraphicsItemFlag.ItemIsMovable
                     BondItem._original_setFlags(self, safe_flags)
                 BondItem.setFlags = bond_set_flags_guarded
-
+ 
             # Final guard: Override flags() to always return non-movable
             if not hasattr(BondItem, "_original_flags"):
                 BondItem._original_flags = BondItem.flags
@@ -378,22 +407,16 @@ def toggle_monkey_patches(active):
                     f = BondItem._original_flags(self)
                     return f & ~QGraphicsItem.GraphicsItemFlag.ItemIsMovable
                 BondItem.flags = bond_flags_guarded
-
+ 
             # Veto ItemPositionChange if it doesn't come from programmatic setPos
             if not hasattr(BondItem, "_original_itemChange"):
                 BondItem._original_itemChange = BondItem.itemChange
                 def bond_item_change_guarded(self, change, value):
-                    if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange and self.scene():
-                        # If the scene is in select mode and we are NOT in the middle of a sync/rotation,
-                        # dragging the bond directly should be blocked.
-                        # However, since ItemIsMovable is False, this normally shouldn't happen.
-                        # If it does, returning current pos effectively blocks the drag.
-                        pass
                     return BondItem._original_itemChange(self, change, value)
                 BondItem.itemChange = bond_item_change_guarded
 
             # Also force update all existing bonds in the scene
-            if mw.scene:
+            if mw and mw.scene:
                 for item in mw.scene.items():
                     if type(item).__name__ == "BondItem" and not sip_isdeleted_safe(item):
                         item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
@@ -404,6 +427,32 @@ def toggle_monkey_patches(active):
         if _original_bond_paint is not None:
             BondItem.paint = _original_bond_paint
             _original_bond_paint = None
+
+def patch_export_logic():
+    """Monkey patch MolecularData to include Z coordinate in Mol exports."""
+    from moleditpy.modules.molecular_data import MolecularData
+    from moleditpy.modules.constants import ANGSTROM_PER_PIXEL
+    
+    if hasattr(MolecularData, "_original_to_rdkit_mol"): return
+    MolecularData._original_to_rdkit_mol = MolecularData.to_rdkit_mol
+
+    def patched_to_rdkit_mol(self, use_2d_stereo=True):
+        mol = self._original_to_rdkit_mol(use_2d_stereo)
+        if mol and mol.GetNumConformers() > 0:
+            conf = mol.GetConformer()
+            for i in range(mol.GetNumAtoms()):
+                atom_rd = mol.GetAtomWithIdx(i)
+                if atom_rd.HasProp("_original_atom_id"):
+                    aid = atom_rd.GetIntProp("_original_atom_id")
+                    if aid in self.atoms:
+                        item = self.atoms[aid].get("item")
+                        if item and not sip_isdeleted_safe(item) and hasattr(item, "z_3d"):
+                            # Update Z in conformer
+                            pos = conf.GetAtomPosition(i)
+                            conf.SetAtomPosition(i, Point3D(pos.x, pos.y, item.z_3d * ANGSTROM_PER_PIXEL))
+        return mol
+    
+    MolecularData.to_rdkit_mol = patched_to_rdkit_mol
 
 # --- Patched Paint Methods ---
 
@@ -491,6 +540,7 @@ def find_molecules(scene):
     """Find connected components of AtomItems in the scene."""
     all_atoms = []
     all_bonds = []
+    if not scene: return [], [], []
     for item in scene.items():
         if sip_isdeleted_safe(item): continue
         cls_name = type(item).__name__
@@ -499,7 +549,7 @@ def find_molecules(scene):
         elif cls_name == "BondItem":
             all_bonds.append(item)
     
-    if not all_atoms: return []
+    if not all_atoms: return [], [], []
 
     adj = {atom: [] for atom in all_atoms}
     for bond in all_bonds:
@@ -526,7 +576,10 @@ def find_molecules(scene):
 
 def update_molecule_z_ranges(scene):
     """Calculate and store Z-range for each molecule on its atoms."""
-    molecules, _, _ = find_molecules(scene)
+    try:
+        molecules, _, _ = find_molecules(scene)
+    except Exception:
+        return
     for mol_atoms in molecules:
         zs = [getattr(a, "z_3d", 0.0) for a in mol_atoms]
         if not zs: continue
@@ -639,7 +692,8 @@ class RotateToolHandler(QObject):
             if hasattr(self.mw, "activate_select_mode"): self.mw.activate_select_mode()
         
         # Recalculate ranges for depth cues
-        update_molecule_z_ranges(self.mw.scene)
+        if self.mw.scene:
+            update_molecule_z_ranges(self.mw.scene)
 
     def ensure_z_coords(self, force=False):
         if not self.mw.scene: return
@@ -680,7 +734,7 @@ class RotateToolHandler(QObject):
                     item.setZValue(item.z_3d)
                 else:
                     # Fallback for atoms without mapping
-                    item.z_3d = 0.0
+                    item.z_3d = getattr(item, "z_3d", 0.0)
                     item.setZValue(item.z_3d)
         
         # Refresh ranges regardless
@@ -692,11 +746,6 @@ class RotateToolHandler(QObject):
             if event.button() == Qt.MouseButton.LeftButton:
                 # Check for item at click position
                 item = self.mw.view_2d.itemAt(event.position().toPoint())
-                # if item is None:
-                #     # Clicking on empty space -> Switch to select mode
-                #     if self.rotate_act:
-                #         self.rotate_act.setChecked(False)
-                #     return False
                 
                 self.is_dragging = True
                 self.last_pos = event.position().toPoint()
