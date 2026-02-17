@@ -14,7 +14,7 @@ PLUGIN_AUTHOR = "HiroYokoyama"
 PLUGIN_DESCRIPTION = "Integrated 3D depth cues and rotation."
 
 # Global state
-_show_depth_cues = False
+_show_depth_cues = True
 _rotate_tool_handler = None
 _depth_cue_strength = 0.8  # 0.0 to 1.0
 
@@ -38,11 +38,6 @@ def initialize(context):
     
     # --- Action Callbacks ---
     
-    def on_proj_toggled(checked):
-        toggle_monkey_patches(checked)
-        mw.scene.update()
-        mw.statusBar().showMessage(f"Depth Cues {'Enabled' if checked else 'Disabled'}")
-
     def on_rotate_toggled(checked):
         _rotate_tool_handler.set_active(checked)
 
@@ -57,14 +52,8 @@ def initialize(context):
             mw.trigger_conversion()
             QTimer.singleShot(1000, lambda: sync_to_3d_layout(mw, mw.current_mol))
         
-        # Ensure projection is on
-        tb = getattr(mw, 'plugin_toolbar', None)
-        if tb:
-            for act in tb.actions():
-                if act.text() == "3D Proj View":
-                    act.setChecked(True)
-                    # Note: setChecked fires toggled signal
-                    break
+        # Ensure projection logic is synced (patches are always on now)
+        mw.scene.update()
 
     def show_settings_dialog():
         global _depth_cue_strength
@@ -90,10 +79,9 @@ def initialize(context):
 
     # --- Standard Registration ---
     
-    context.add_toolbar_action(lambda: None, "3D Proj View", tooltip="Toggle depth cues")
     context.add_toolbar_action(lambda: None, "Rotate 3D", tooltip="Rotate molecule in 3D")
     context.add_toolbar_action(on_cleanup_triggered, "Clean Up 3D", tooltip="Sync 2D layout to 3D")
-    context.add_toolbar_action(show_settings_dialog, "⚙", tooltip="Settings")
+    context.add_toolbar_action(show_settings_dialog, "3D on 2D Setting", tooltip="Settings")
     
     # --- Post-Processing (Refine toolbar UI) ---
     
@@ -102,18 +90,15 @@ def initialize(context):
         if not tb: return
         
         actions = list(tb.actions())
-        proj_act = next((a for a in actions if a.text() == "3D Proj View"), None)
         rotate_act = next((a for a in actions if a.text() == "Rotate 3D"), None)
         cleanup_act = next((a for a in actions if a.text() == "Clean Up 3D"), None)
-        settings_act = next((a for a in actions if a.text() == "⚙"), None)
+        settings_act = next((a for a in actions if a.text() == "3D on 2D Setting"), None)
         
         # Set Checkable and connect toggled
-        if proj_act:
-            proj_act.setCheckable(True)
-            proj_act.toggled.connect(on_proj_toggled)
         if rotate_act:
             rotate_act.setCheckable(True)
             rotate_act.toggled.connect(on_rotate_toggled)
+            _rotate_tool_handler.rotate_act = rotate_act
         
         # Mode Integration: Add Rotate 3D to main tool group for exclusivity
         if rotate_act and hasattr(mw, "tool_group"):
@@ -132,7 +117,6 @@ def initialize(context):
     # Persistence
     def save_state():
         state = {
-            "show_depth_cues": _show_depth_cues,
             "depth_cue_strength": _depth_cue_strength
         }
         if mw.scene and hasattr(mw.scene, 'data'):
@@ -145,20 +129,11 @@ def initialize(context):
         return state
 
     def load_state(data):
-        global _show_depth_cues, _depth_cue_strength
+        global _depth_cue_strength
         if not data: return
-        _show_depth_cues = data.get("show_depth_cues", False)
         _depth_cue_strength = data.get("depth_cue_strength", 0.8)
         
-        def restore_checks():
-            tb = getattr(mw, 'plugin_toolbar', None)
-            if tb:
-                for act in tb.actions():
-                    if act.text() == "3D Proj View":
-                        act.setChecked(_show_depth_cues)
-                        toggle_monkey_patches(_show_depth_cues)
-                        break
-        QTimer.singleShot(100, restore_checks)
+        QTimer.singleShot(100, lambda: mw.scene.update() if mw.scene else None)
 
         if "z_data" in data and mw.scene and hasattr(mw.scene, 'data'):
             z_map = data["z_data"]
@@ -175,6 +150,9 @@ def initialize(context):
     context.register_load_handler(load_state)
 
     _rotate_tool_handler = RotateToolHandler(mw)
+    
+    # Initialize patches
+    toggle_monkey_patches(True)
 
 def toggle_monkey_patches(active):
     from moleditpy.modules.atom_item import AtomItem
@@ -204,26 +182,33 @@ def patched_atom_paint(self, painter, option, widget):
     from moleditpy.modules import atom_item
     
     if _show_depth_cues and hasattr(self, "z_3d") and self.scene():
-        z_min, z_max = get_scene_z_range(self.scene())
-        z_range = z_max - z_min if z_max != z_min else 1.0
-        depth_factor = (self.z_3d - z_min) / z_range
-        white_factor = (1.0 - depth_factor) * _depth_cue_strength
+        # Use per-molecule range if available, else scene range
+        z_min = getattr(self, "mol_z_min", None)
+        z_max = getattr(self, "mol_z_max", None)
         
-        if white_factor > 0.05:
-            # Shift colors in CPK_COLORS temporarily
-            sym = self.symbol
-            orig_color = atom_item.CPK_COLORS.get(sym, atom_item.CPK_COLORS["DEFAULT"])
-            faded_color = blend_with_white(orig_color, white_factor)
+        if z_min is None or z_max is None:
+            z_min, z_max = get_scene_z_range(self.scene())
             
-            # Temporary Swap
-            had_key = sym in atom_item.CPK_COLORS
-            atom_item.CPK_COLORS[sym] = faded_color
-            try:
-                _original_atom_paint(self, painter, option, widget)
-            finally:
-                if had_key: atom_item.CPK_COLORS[sym] = orig_color
-                else: atom_item.CPK_COLORS.pop(sym, None)
-            return
+        z_range = z_max - z_min
+        if _show_depth_cues and z_range > 1e-4:
+            depth_factor = (self.z_3d - z_min) / z_range
+            white_factor = (1.0 - depth_factor) * _depth_cue_strength
+            
+            if white_factor > 0.05:
+                # Shift colors in CPK_COLORS temporarily
+                sym = self.symbol
+                orig_color = atom_item.CPK_COLORS.get(sym, atom_item.CPK_COLORS["DEFAULT"])
+                faded_color = blend_with_white(orig_color, white_factor)
+                
+                # Temporary Swap
+                had_key = sym in atom_item.CPK_COLORS
+                atom_item.CPK_COLORS[sym] = faded_color
+                try:
+                    _original_atom_paint(self, painter, option, widget)
+                finally:
+                    if had_key: atom_item.CPK_COLORS[sym] = orig_color
+                    else: atom_item.CPK_COLORS.pop(sym, None)
+                return
 
     _original_atom_paint(self, painter, option, widget)
 
@@ -234,23 +219,31 @@ def patched_bond_paint(self, painter, option, widget):
     if _show_depth_cues and hasattr(self.atom1, "z_3d") and hasattr(self.atom2, "z_3d") and self.scene():
         z1, z2 = self.atom1.z_3d, self.atom2.z_3d
         avg_z = (z1 + z2) / 2.0
-        z_min, z_max = get_scene_z_range(self.scene())
-        z_range = z_max - z_min if z_max != z_min else 1.0
-        depth_factor = (avg_z - z_min) / z_range
-        white_factor = (1.0 - depth_factor) * _depth_cue_strength
         
-        if white_factor > 0.05:
-            # Temporary Swap Bond Color in Settings to influence internal drawing
-            win = self.scene().views()[0].window() if self.scene() and self.scene().views() else None
-            if win and hasattr(win, "settings"):
-                orig_hex = win.settings.get("bond_color_2d", "#222222")
-                faded_color = blend_with_white(QColor(orig_hex), white_factor)
-                win.settings["bond_color_2d"] = faded_color.name()
-                try:
-                    _original_bond_paint(self, painter, option, widget)
-                finally:
-                    win.settings["bond_color_2d"] = orig_hex
-                return
+        # Bond's range is from its atoms
+        z_min = getattr(self.atom1, "mol_z_min", None)
+        z_max = getattr(self.atom1, "mol_z_max", None)
+
+        if z_min is None or z_max is None:
+            z_min, z_max = get_scene_z_range(self.scene())
+            
+        z_range = z_max - z_min
+        if _show_depth_cues and z_range > 1e-4:
+            depth_factor = (avg_z - z_min) / z_range
+            white_factor = (1.0 - depth_factor) * _depth_cue_strength
+            
+            if white_factor > 0.05:
+                # Temporary Swap Bond Color in Settings to influence internal drawing
+                win = self.scene().views()[0].window() if self.scene() and self.scene().views() else None
+                if win and hasattr(win, "settings"):
+                    orig_hex = win.settings.get("bond_color_2d", "#222222")
+                    faded_color = blend_with_white(QColor(orig_hex), white_factor)
+                    win.settings["bond_color_2d"] = faded_color.name()
+                    try:
+                        _original_bond_paint(self, painter, option, widget)
+                    finally:
+                        win.settings["bond_color_2d"] = orig_hex
+                    return
 
     _original_bond_paint(self, painter, option, widget)
 
@@ -263,6 +256,54 @@ def get_scene_z_range(scene):
                 zs.append(item.z_3d)
     if not zs: return -5.0, 5.0
     return min(zs), max(zs)
+
+def find_molecules(scene):
+    """Find connected components of AtomItems in the scene."""
+    all_atoms = []
+    all_bonds = []
+    for item in scene.items():
+        if sip_isdeleted_safe(item): continue
+        cls_name = type(item).__name__
+        if cls_name == "AtomItem":
+            all_atoms.append(item)
+        elif cls_name == "BondItem":
+            all_bonds.append(item)
+    
+    if not all_atoms: return []
+
+    adj = {atom: [] for atom in all_atoms}
+    for bond in all_bonds:
+        if bond.atom1 in adj and bond.atom2 in adj:
+            adj[bond.atom1].append(bond.atom2)
+            adj[bond.atom2].append(bond.atom1)
+
+    visited = set()
+    molecules = []
+    for atom in all_atoms:
+        if atom not in visited:
+            mol_atoms = []
+            stack = [atom]
+            visited.add(atom)
+            while stack:
+                curr = stack.pop()
+                mol_atoms.append(curr)
+                for neighbor in adj.get(curr, []):
+                    if neighbor not in visited:
+                        visited.add(neighbor)
+                        stack.append(neighbor)
+            molecules.append(mol_atoms)
+    return molecules, all_atoms, all_bonds
+
+def update_molecule_z_ranges(scene):
+    """Calculate and store Z-range for each molecule on its atoms."""
+    molecules, _, _ = find_molecules(scene)
+    for mol_atoms in molecules:
+        zs = [getattr(a, "z_3d", 0.0) for a in mol_atoms]
+        if not zs: continue
+        z_min, z_max = min(zs), max(zs)
+        for a in mol_atoms:
+            a.mol_z_min = z_min
+            a.mol_z_max = z_max
 
 # --- Logic ---
 
@@ -309,6 +350,7 @@ def sync_to_3d_layout(mw, mol):
             # Depth sort bonds in sync logic too
             if hasattr(item.atom1, "z_3d") and hasattr(item.atom2, "z_3d"):
                 item.setZValue((item.atom1.z_3d + item.atom2.z_3d) / 2.0)
+    update_molecule_z_ranges(mw.scene)
     mw.scene.update()
 
 class RotateToolHandler(QObject):
@@ -317,6 +359,7 @@ class RotateToolHandler(QObject):
         self.mw = mw
         self.active = False
         self.is_dragging = False
+        self.rotate_act = None
         self.mw.view_2d.viewport().installEventFilter(self)
         
     def set_active(self, state):
@@ -327,6 +370,8 @@ class RotateToolHandler(QObject):
         else:
             self.mw.scene.mode = "select"
             if hasattr(self.mw, "activate_select_mode"): self.mw.activate_select_mode()
+        self.ensure_z_coords()
+        update_molecule_z_ranges(self.mw.scene)
 
     def ensure_z_coords(self):
         if not self.mw.scene: return
@@ -355,6 +400,14 @@ class RotateToolHandler(QObject):
         if not self.active: return False
         if event.type() == QEvent.Type.MouseButtonPress:
             if event.button() == Qt.MouseButton.LeftButton:
+                # Check for item at click position
+                item = self.mw.view_2d.itemAt(event.position().toPoint())
+                if item is None:
+                    # Clicking on empty space -> Switch to select mode
+                    if self.rotate_act:
+                        self.rotate_act.setChecked(False)
+                    return False
+                
                 self.is_dragging = True
                 self.last_pos = event.position().toPoint()
                 return True
@@ -377,42 +430,10 @@ class RotateToolHandler(QObject):
         if not self.mw.scene or not hasattr(self.mw.scene, 'data'):
             return
 
-        # 1. Collect all atoms and bonds in the scene to build adjacency
-        all_atoms = []
-        all_bonds = []
-        for item in self.mw.scene.items():
-            if sip_isdeleted_safe(item): continue
-            cls_name = type(item).__name__
-            if cls_name == "AtomItem":
-                all_atoms.append(item)
-            elif cls_name == "BondItem":
-                all_bonds.append(item)
+        # 1-3. Find connected components (molecules)
+        molecules, all_atoms, all_bonds = find_molecules(self.mw.scene)
         
         if not all_atoms: return
-
-        # 2. Build adjacency list for connected component analysis
-        adj = {atom: [] for atom in all_atoms}
-        for bond in all_bonds:
-            if bond.atom1 in adj and bond.atom2 in adj:
-                adj[bond.atom1].append(bond.atom2)
-                adj[bond.atom2].append(bond.atom1)
-
-        # 3. Find connected components (molecules)
-        visited = set()
-        molecules = []
-        for atom in all_atoms:
-            if atom not in visited:
-                mol_atoms = []
-                stack = [atom]
-                visited.add(atom)
-                while stack:
-                    curr = stack.pop()
-                    mol_atoms.append(curr)
-                    for neighbor in adj.get(curr, []):
-                        if neighbor not in visited:
-                            visited.add(neighbor)
-                            stack.append(neighbor)
-                molecules.append(mol_atoms)
 
         # 4. Filter molecules: keep only those with at least one selected item
         # If nothing is selected, we keep ALL molecules.
@@ -461,6 +482,7 @@ class RotateToolHandler(QObject):
             if hasattr(bond.atom1, "z_3d") and hasattr(bond.atom2, "z_3d"):
                 bond.setZValue((bond.atom1.z_3d + bond.atom2.z_3d) / 2.0)
                 
+        update_molecule_z_ranges(self.mw.scene)
         self.mw.scene.update()
 
 
