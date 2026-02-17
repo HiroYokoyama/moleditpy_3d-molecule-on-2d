@@ -1,4 +1,3 @@
-
 import numpy as np
 try:
     from PyQt6 import sip
@@ -375,36 +374,95 @@ class RotateToolHandler(QObject):
         return False
 
     def rotate_molecule(self, dx, dy):
-        atoms = []; points = []
-        if not self.mw.scene or not hasattr(self.mw.scene, 'data') or not hasattr(self.mw.scene.data, 'atoms'): 
+        if not self.mw.scene or not hasattr(self.mw.scene, 'data'):
             return
-            
-        for aid, atom_data in self.mw.scene.data.atoms.items():
-            item = atom_data.get('item')
-            if item and not sip_isdeleted_safe(item):
-                z = getattr(item, "z_3d", 0.0)
-                atoms.append(item)
-                points.append([item.pos().x(), item.pos().y(), z])
+
+        # 1. Collect all atoms and bonds in the scene to build adjacency
+        all_atoms = []
+        all_bonds = []
+        for item in self.mw.scene.items():
+            if sip_isdeleted_safe(item): continue
+            cls_name = type(item).__name__
+            if cls_name == "AtomItem":
+                all_atoms.append(item)
+            elif cls_name == "BondItem":
+                all_bonds.append(item)
         
-        if not points: return
-        pts = np.array(points)
-        center = np.mean(pts, axis=0)
+        if not all_atoms: return
+
+        # 2. Build adjacency list for connected component analysis
+        adj = {atom: [] for atom in all_atoms}
+        for bond in all_bonds:
+            if bond.atom1 in adj and bond.atom2 in adj:
+                adj[bond.atom1].append(bond.atom2)
+                adj[bond.atom2].append(bond.atom1)
+
+        # 3. Find connected components (molecules)
+        visited = set()
+        molecules = []
+        for atom in all_atoms:
+            if atom not in visited:
+                mol_atoms = []
+                stack = [atom]
+                visited.add(atom)
+                while stack:
+                    curr = stack.pop()
+                    mol_atoms.append(curr)
+                    for neighbor in adj.get(curr, []):
+                        if neighbor not in visited:
+                            visited.add(neighbor)
+                            stack.append(neighbor)
+                molecules.append(mol_atoms)
+
+        # 4. Filter molecules: keep only those with at least one selected item
+        # If nothing is selected, we keep ALL molecules.
+        any_selected = any(a.isSelected() for a in all_atoms) or any(b.isSelected() for b in all_bonds)
+        
+        target_molecules = []
+        if any_selected:
+            # Check if molecule contains any selected atom or if any of its internal bonds are selected
+            for mol_atoms in molecules:
+                mol_set = set(mol_atoms)
+                has_selection = any(a.isSelected() for a in mol_atoms)
+                if not has_selection:
+                    # Check bonds connected to these atoms
+                    for bond in all_bonds:
+                        if bond.isSelected() and (bond.atom1 in mol_set or bond.atom2 in mol_set):
+                            has_selection = True
+                            break
+                if has_selection:
+                    target_molecules.append(mol_atoms)
+        else:
+            target_molecules = molecules
+
+        if not target_molecules: return
+
+        # 5. Rotate each target molecule around its own COG
         Rx = np.array([[1, 0, 0], [0, np.cos(dy), -np.sin(dy)], [0, np.sin(dy), np.cos(dy)]])
         Ry = np.array([[np.cos(dx), 0, np.sin(dx)], [0, 1, 0], [-np.sin(dx), 0, np.cos(dx)]])
         R = Rx @ Ry
-        new_pts = (pts - center) @ R.T + center
-        for i, atom in enumerate(atoms):
-            atom.setPos(QPointF(new_pts[i, 0], new_pts[i, 1]))
-            atom.z_3d = new_pts[i, 2]
-            # White is back: Ensure closer atoms (higher Z) overlap distant ones
-            atom.setZValue(atom.z_3d)
-        for item in self.mw.scene.items():
-            if type(item).__name__ == "BondItem" and not sip_isdeleted_safe(item):
-                if hasattr(item, "update_position"): item.update_position()
-                # White is back: Depth sort bonds based on average Z
-                if hasattr(item.atom1, "z_3d") and hasattr(item.atom2, "z_3d"):
-                    item.setZValue((item.atom1.z_3d + item.atom2.z_3d) / 2.0)
+
+        for mol_atoms in target_molecules:
+            points = np.array([[a.pos().x(), a.pos().y(), getattr(a, "z_3d", 0.0)] for a in mol_atoms])
+            center = np.mean(points, axis=0)
+            
+            new_pts = (points - center) @ R.T + center
+            
+            for i, atom in enumerate(mol_atoms):
+                atom.setPos(QPointF(new_pts[i, 0], new_pts[i, 1]))
+                atom.z_3d = new_pts[i, 2]
+                atom.setZValue(atom.z_3d)
+
+        # 6. Update all bond positions
+        for bond in all_bonds:
+            if hasattr(bond, "update_position"):
+                bond.update_position()
+            # Depth sort bonds based on average Z
+            if hasattr(bond.atom1, "z_3d") and hasattr(bond.atom2, "z_3d"):
+                bond.setZValue((bond.atom1.z_3d + bond.atom2.z_3d) / 2.0)
+                
         self.mw.scene.update()
+
 
 def sip_isdeleted_safe(obj):
     try: return sip.isdeleted(obj)
