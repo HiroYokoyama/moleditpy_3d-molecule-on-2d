@@ -131,9 +131,18 @@ def on_cleanup_triggered():
     # If all atoms and bonds in scene are mapped to the current RDKit model, we don't need re-conversion
     all_mapped = scene_oids.issubset(mapped_oids) and (scene_bonds == mol_bonds) and len(scene_oids) > 0
     
-    if not (has_3d_conf and all_mapped):
-        # Missing 3D data or new atoms added that aren't in the model yet
-        mw.statusBar().showMessage("Generating 3D coordinates...")
+    # Check if the conformer is effectively 2D (flat)
+    is_flat = True
+    if has_3d_conf:
+        conf = mol.GetConformer()
+        zs = [conf.GetAtomPosition(i).z for i in range(mol.GetNumAtoms())]
+        if zs and (max(zs) - min(zs)) > 1e-4:
+            is_flat = False
+
+    if not (has_3d_conf and all_mapped) or is_flat:
+        # Missing 3D data, mapping mismatch, or flat conformer
+        reason = "Flat conformer" if is_flat and has_3d_conf else "Missing/Unmapped 3D data"
+        mw.statusBar().showMessage(f"Generating 3D coordinates ({reason})...")
         mw.trigger_conversion()
         # Wait for conversion to complete
         QTimer.singleShot(1100, lambda: sync_to_3d_layout(mw, mw.current_mol))
@@ -268,15 +277,23 @@ def initialize(context):
     # Register Toolbar Actions (Standard registration)
     context.add_toolbar_action(on_cleanup_triggered, "Clean Up 3D", tooltip="Sync 2D layout to 3D")
     context.add_toolbar_action(lambda: None, "Rotate 3D", tooltip="Rotate molecule in 3D")
-    context.add_toolbar_action(show_settings_dialog, "3D on 2D Detail Settings...", tooltip="Fine-tune visuals")
-
-    if _enabled:
-        # Avoid immediate UI interference, let the app finish startup
-        QTimer.singleShot(0, lambda: enable_plugin(mw, context))
-
+    context.add_toolbar_action(show_settings_dialog, "3D on 2D Settings...", tooltip="Fine-tune visuals")
     # Register Save/Load handlers for project file persistence
     context.register_save_handler(save_state)
     context.register_load_handler(load_state)
+
+    def startup_fix():
+        # First capture the actions that were just registered
+        configure_actions()
+        if _enabled:
+            # enable_plugin will activate patches and configure actions properly
+            enable_plugin(mw, context)
+        else:
+            # disable_plugin will hide the actions we just found
+            disable_plugin(mw)
+
+    # Avoid immediate UI interference, let the app finish startup
+    QTimer.singleShot(0, startup_fix)
 
 def enable_plugin(mw, context):
     global _rotate_tool_handler
