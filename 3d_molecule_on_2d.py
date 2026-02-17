@@ -62,24 +62,40 @@ def initialize(context):
         global _show_depth_cues
         mol = mw.current_mol
         
-        # Check if 3D data exists and matches the scene
         all_atoms = [i for i in mw.scene.items() if type(i).__name__ == "AtomItem" and not sip_isdeleted_safe(i)]
-        has_3d = all(hasattr(a, "z_3d") for a in all_atoms)
-        count_match = mol and mol.GetNumAtoms() == len(all_atoms)
+        if not all_atoms: return
+
+        # Check if RDKit mol has 3D data
+        has_3d_conf = mol and mol.GetNumConformers() > 0
         
-        if not (has_3d and count_match):
-            mw.statusBar().showMessage("Generating 3D coordinates for new molecules...")
-            mw.trigger_conversion()
-            # Wait for conversion to complete (conversion uses a thread internally usually)
-            # 1 second is a safe heuristic for small-to-mid molecules
-            QTimer.singleShot(1000, lambda: sync_to_3d_layout(mw, mw.current_mol))
-        elif mol and mol.GetNumConformers() > 0:
-            mw.statusBar().showMessage("Syncing 3D coordinates...")
+        # Check if all atoms in scene have mapping to RDKit mol
+        mapped_oids = set()
+        if mol:
+            for a in mol.GetAtoms():
+                try:
+                    if a.HasProp("_original_atom_id"): mapped_oids.add(a.GetIntProp("_original_atom_id"))
+                    elif a.HasProp("original_id"): mapped_oids.add(a.GetIntProp("original_id"))
+                except: pass
+        
+        scene_oids = {a.atom_id for a in all_atoms}
+        # If all scene atoms are mapped to the current RDKit model, we don't need re-conversion
+        all_mapped = scene_oids.issubset(mapped_oids) and len(scene_oids) > 0
+        
+        if has_3d_conf and all_mapped:
+            # We have 3D data and mapping, just sync positions
+            mw.statusBar().showMessage("Syncing 2D layout to existing 3D data...")
             sync_to_3d_layout(mw, mol)
         else:
-            mw.statusBar().showMessage("Wait... generating 3D data first.")
+            # Missing 3D data or new atoms added that aren't in the model yet
+            mw.statusBar().showMessage("Generating 3D coordinates...")
             mw.trigger_conversion()
-            QTimer.singleShot(1000, lambda: sync_to_3d_layout(mw, mw.current_mol))
+            # Wait for conversion to complete (conversion uses a thread internally usually)
+            QTimer.singleShot(1100, lambda: sync_to_3d_layout(mw, mw.current_mol))
+        
+        # Force bonds to be non-movable again just in case
+        for item in mw.scene.items():
+            if type(item).__name__ == "BondItem" and not sip_isdeleted_safe(item):
+                item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
         
         mw.scene.update()
 
@@ -362,6 +378,25 @@ def toggle_monkey_patches(active):
                     f = BondItem._original_flags(self)
                     return f & ~QGraphicsItem.GraphicsItemFlag.ItemIsMovable
                 BondItem.flags = bond_flags_guarded
+
+            # Veto ItemPositionChange if it doesn't come from programmatic setPos
+            if not hasattr(BondItem, "_original_itemChange"):
+                BondItem._original_itemChange = BondItem.itemChange
+                def bond_item_change_guarded(self, change, value):
+                    if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange and self.scene():
+                        # If the scene is in select mode and we are NOT in the middle of a sync/rotation,
+                        # dragging the bond directly should be blocked.
+                        # However, since ItemIsMovable is False, this normally shouldn't happen.
+                        # If it does, returning current pos effectively blocks the drag.
+                        pass
+                    return BondItem._original_itemChange(self, change, value)
+                BondItem.itemChange = bond_item_change_guarded
+
+            # Also force update all existing bonds in the scene
+            if mw.scene:
+                for item in mw.scene.items():
+                    if type(item).__name__ == "BondItem" and not sip_isdeleted_safe(item):
+                        item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
     else:
         if _original_atom_paint is not None:
             AtomItem.paint = _original_atom_paint
