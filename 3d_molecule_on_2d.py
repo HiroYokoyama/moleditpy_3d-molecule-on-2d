@@ -17,7 +17,7 @@ from PyQt6.QtGui import QColor, QPen, QIcon, QAction, QActionGroup, QPainter, QB
 
 # Metadata
 PLUGIN_NAME = "3D Molecule on 2D"
-PLUGIN_VERSION = "1.2.0"
+PLUGIN_VERSION = "1.2.1"
 PLUGIN_AUTHOR = "HiroYokoyama"
 PLUGIN_DESCRIPTION = "Integrated 3D depth cues, rotation, and 3D-aware Mol export."
 
@@ -185,11 +185,6 @@ def on_cleanup_triggered(*args, allow_trigger=True, **kwargs):
             mw.statusBar().showMessage("Smart 3D: Conversion needed for synchronization.")
     finally:
         _is_syncing = False
-
-    # Force bonds to be non-movable
-    for item in mw.scene.items():
-        if type(item).__name__ == "BondItem" and not sip_isdeleted_safe(item):
-            item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
     
     mw.scene.update()
 
@@ -399,7 +394,6 @@ def on_rotate_toggled(checked):
             if mw.scene:
                 _, _, all_bonds = find_molecules(mw.scene)
                 for bond in all_bonds:
-                    bond.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
                     if hasattr(bond, "update_position"):
                         bond.update_position()
                     if hasattr(bond.atom1, "z_3d") and hasattr(bond.atom2, "z_3d"):
@@ -536,33 +530,7 @@ def toggle_monkey_patches(active, mw=None):
             from moleditpy.modules.bond_item import BondItem
             _original_bond_paint = BondItem.paint
             BondItem.paint = patched_bond_paint
-            # Ensure bonds are never movable
-            if not hasattr(BondItem, "_original_init"):
-                BondItem._original_init = BondItem.__init__
-                def bond_init_fix(self, *args, **kwargs):
-                    BondItem._original_init(self, *args, **kwargs)
-                    self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
-                BondItem.__init__ = bond_init_fix
             
-            # Also patch setFlag and setFlags to ignore ItemIsMovable for bonds
-            if not hasattr(BondItem, "_original_setFlag"):
-                BondItem._original_setFlag = BondItem.setFlag
-                def bond_set_flag_guarded(self, flag, enabled=True):
-                    if flag == QGraphicsItem.GraphicsItemFlag.ItemIsMovable and enabled:
-                        # Force disable movement even if requested
-                        BondItem._original_setFlag(self, flag, False)
-                        return
-                    BondItem._original_setFlag(self, flag, enabled)
-                BondItem.setFlag = bond_set_flag_guarded
- 
-            if not hasattr(BondItem, "_original_setFlags"):
-                BondItem._original_setFlags = BondItem.setFlags
-                def bond_set_flags_guarded(self, flags):
-                    # Mask out ItemIsMovable
-                    safe_flags = flags & ~QGraphicsItem.GraphicsItemFlag.ItemIsMovable
-                    BondItem._original_setFlags(self, safe_flags)
-                BondItem.setFlags = bond_set_flags_guarded
-
         # Patch MainWindowCompute to detect conversion finish
         from moleditpy.modules.main_window_compute import MainWindowCompute
         if not hasattr(MainWindowCompute, "_original_on_calculation_finished"):
@@ -584,11 +552,6 @@ def toggle_monkey_patches(active, mw=None):
                     return BondItem._original_itemChange(self, change, value)
                 BondItem.itemChange = bond_item_change_guarded
 
-            # Also force update all existing bonds in the scene
-            if mw and mw.scene:
-                for item in mw.scene.items():
-                    if type(item).__name__ == "BondItem" and not sip_isdeleted_safe(item):
-                        item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
     else:
         from moleditpy.modules.main_window_compute import MainWindowCompute
         if hasattr(MainWindowCompute, "_original_on_calculation_finished"):
@@ -857,7 +820,6 @@ def sync_to_3d_layout(mw, mol):
 
     # 5. Update ALL bonds (ensure position and ZValue) and Z-ranges
     for bond in all_bonds:
-        bond.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
         if hasattr(bond, "update_position"):
             bond.update_position()
         if hasattr(bond.atom1, "z_3d") and hasattr(bond.atom2, "z_3d"):
