@@ -1,4 +1,5 @@
 import os
+import time
 import json
 import numpy as np
 try:
@@ -16,7 +17,7 @@ from PyQt6.QtGui import QColor, QPen, QIcon, QAction, QActionGroup, QPainter, QB
 
 # Metadata
 PLUGIN_NAME = "3D Molecule on 2D"
-PLUGIN_VERSION = "1.1.0"
+PLUGIN_VERSION = "1.2.0"
 PLUGIN_AUTHOR = "HiroYokoyama"
 PLUGIN_DESCRIPTION = "Integrated 3D depth cues, rotation, and 3D-aware Mol export."
 
@@ -25,7 +26,7 @@ _enabled = True
 _show_depth_cues = True
 _rotate_tool_handler = None
 _depth_cue_strength = 0.8  # 0.0 to 1.0
-_3d_scale = 50.0           # Matches ANGSTROM_PER_PIXEL (0.02) exactly
+_3d_scale = 50.0           # Strictly matches 1.0 / ANGSTROM_PER_PIXEL (1.0 / 0.02 = 50)
 _mw = None
 _context = None
 _settings_file = os.path.splitext(os.path.abspath(__file__))[0] + ".json"
@@ -36,15 +37,31 @@ _original_bond_paint = None
 _original_save_as_mol = None
 _toolbar_actions_objs = []
 _export_in_progress = False
+_plugin_triggered_conversion = False
+_last_cleanup_trigger_time = 0
+_is_syncing = False
+
 
 def blend_with_white(color, factor):
-    """Linearly interpolate color towards white."""
-    if factor <= 0.0: return color
-    f = min(1.0, factor)
-    r = int(color.red() + (255 - color.red()) * f)
-    g = int(color.green() + (255 - color.green()) * f)
-    b = int(color.blue() + (255 - color.blue()) * f)
+    # Linearly interpolate color towards white.
+    r = int(color.red() + (255 - color.red()) * factor)
+    g = int(color.green() + (255 - color.green()) * factor)
+    b = int(color.blue() + (255 - color.blue()) * factor)
     return QColor(r, g, b)
+
+def get_original_id(atom):
+    """Chain of responsibility style property lookup for atom IDs."""
+    if not atom: return None
+    # Prioritize official property, fallback to legacy
+    for prop_name in ["_original_atom_id", "original_id"]:
+        if atom.HasProp(prop_name):
+            try:
+                # Handle both int and string properties safely
+                val = atom.GetProp(prop_name)
+                return int(val)
+            except (ValueError, TypeError):
+                continue
+    return None
 
 class PluginSettingsDialog(QDialog):
     def __init__(self, parent=None, current_enabled=True):
@@ -70,57 +87,115 @@ class PluginSettingsDialog(QDialog):
         super().accept()
 
 def load_settings():
-    global _enabled
+    global _enabled, _depth_cue_strength, _3d_scale
     try:
         if os.path.exists(_settings_file):
             import json
             with open(_settings_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 _enabled = data.get('enabled', True)
+                _depth_cue_strength = data.get('depth_cue_strength', 0.8)
+                _3d_scale = data.get('3d_scale', 50.0)
     except Exception as e:
         print(f"[{PLUGIN_NAME}] Error loading settings: {e}")
 
 def save_settings():
     try:
         import json
-        data = {'enabled': _enabled}
+        data = {
+            'enabled': _enabled,
+            'depth_cue_strength': _depth_cue_strength,
+            '3d_scale': _3d_scale
+        }
         with open(_settings_file, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=4)
     except Exception as e:
         print(f"[{PLUGIN_NAME}] Error saving settings: {e}")
 
-def on_cleanup_triggered(*args, **kwargs):
-    # Safety: We NEVER call mw.trigger_conversion() here anymore to avoid modifying 
-    # the user's saved 3D coordinates. We just sync to what exists.
-    # Note: args[0] may be a bool (checked state) if called from QAction.triggered
-    global _mw
+def on_cleanup_triggered(*args, allow_trigger=True, **kwargs):
+    """
+    Smart 3D Trigger with Recursion Guard.
+    """
+    global _mw, _last_cleanup_trigger_time, _is_syncing
     mw = _mw
-    if not mw: return
-    mol = mw.current_mol
-    if not mol: return
-
-    has_3d_conf = mol and mol.GetNumConformers() > 0
-    if has_3d_conf:
-        # Check if the conformer is effectively 2D (flat)
-        is_flat = True
-        conf = mol.GetConformer()
-        zs = [conf.GetAtomPosition(i).z for i in range(mol.GetNumAtoms())]
-        if zs and (max(zs) - min(zs)) > 1e-4:
-            is_flat = False
-            
-        mw.statusBar().showMessage("Syncing layout to existing 3D data...")
-        sync_to_3d_layout(mw, mol)
-        if is_flat:
-             mw.statusBar().showMessage("Note: Source is 2D (flat). Layout synced to Z=0.")
-    else:
-        mw.statusBar().showMessage("No 3D data available. Use main Conversion tool first.")
+    if not mw or not mw.scene: return
+    if _is_syncing: return
     
-    # Force bonds to be non-movable again just in case
+    _is_syncing = True
+    try:
+        # 0. Detect molecules in the scene
+        molecules, all_atoms, all_bonds = find_molecules(mw.scene)
+        if not molecules:
+            mw.statusBar().showMessage("No molecules in scene.")
+            return
+
+        # 1. Determine if we NEED a 3D refresh
+        mol = mw.current_mol
+        needs_3d_refresh = False
+        status_msg = ""
+        
+        if not mol or mol.GetNumConformers() == 0:
+            needs_3d_refresh = True
+            status_msg = "No 3D conformer found."
+        else:
+            # Check 1: Is the conformer actually 3D (non-flat)?
+            conf = mol.GetConformer()
+            zs = [conf.GetAtomPosition(i).z for i in range(mol.GetNumAtoms())]
+            if not zs or (max(zs) - min(zs)) < 1e-3:
+                needs_3d_refresh = True
+                status_msg = "Scene is 2D (flat)."
+            else:
+                # Check 2: Are all heavy atoms mapped?
+                id_to_idx = {get_original_id(mol.GetAtomWithIdx(i)): i 
+                             for i in range(mol.GetNumAtoms()) 
+                             if get_original_id(mol.GetAtomWithIdx(i)) is not None}
+                
+                for atom_item in all_atoms:
+                    if getattr(atom_item, "symbol", "") == "H": continue
+                    aid = getattr(atom_item, "atom_id", None)
+                    if aid is None or aid not in id_to_idx:
+                        needs_3d_refresh = True
+                        status_msg = f"Heavy atom mapping missing."
+                        break
+        
+        # 2. Action Logic
+        if needs_3d_refresh and allow_trigger:
+            # Loop protection: No more than one trigger per 5 seconds
+            now = time.time()
+            if now - _last_cleanup_trigger_time < 5.0:
+                mw.statusBar().showMessage("Smart 3D: Cooldown active. Skipping re-trigger.")
+                return
+            
+            _last_cleanup_trigger_time = now
+            mw.statusBar().showMessage(f"Smart 3D: {status_msg} Triggering Conversion...")
+            if hasattr(mw, "trigger_conversion"):
+                global _plugin_triggered_conversion
+                _plugin_triggered_conversion = True
+                mw.trigger_conversion()
+                return # Wait for conversion to finish
+        
+        # 3. Perform Sync
+        if mol and mol.GetNumConformers() > 0:
+            if needs_3d_refresh:
+                mw.statusBar().showMessage("Smart 3D: Syncing whatever available...")
+            else:
+                mw.statusBar().showMessage("Smart 3D: Syncing layout to 3D...")
+            sync_to_3d_layout(mw, mol)
+        else:
+            mw.statusBar().showMessage("Smart 3D: Conversion needed for synchronization.")
+    finally:
+        _is_syncing = False
+
+    # Force bonds to be non-movable
     for item in mw.scene.items():
         if type(item).__name__ == "BondItem" and not sip_isdeleted_safe(item):
             item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
     
     mw.scene.update()
+
+    global _rotate_tool_handler
+    if _rotate_tool_handler and hasattr(_rotate_tool_handler, "rotate_act") and _rotate_tool_handler.rotate_act:
+        _rotate_tool_handler.rotate_act.setChecked(True)
 
 def show_settings_dialog(*args, **kwargs):
     global _depth_cue_strength, _3d_scale, _mw
@@ -155,36 +230,7 @@ def show_settings_dialog(*args, **kwargs):
         global _3d_scale
         old_scale = _3d_scale
         _3d_scale = float(v)
-        scale_value_label.setText(f"{_3d_scale:.1f}")
-        
-        # Dyna-scale existing values in the scene for immediate visual feedback
-        if mw.scene and abs(old_scale) > 1e-4:
-            factor = _3d_scale / old_scale
-            molecules, _, all_bonds = find_molecules(mw.scene)
-            
-            for mol_atoms in molecules:
-                # Scale positions relative to molecule center
-                pts = np.array([[a.pos().x(), a.pos().y()] for a in mol_atoms])
-                center = np.mean(pts, axis=0)
-                new_pts = (pts - center) * factor + center
-                
-                for i, atom in enumerate(mol_atoms):
-                    atom.setPos(QPointF(new_pts[i, 0], new_pts[i, 1]))
-                    if hasattr(atom, "z_3d"):
-                        atom.z_3d *= factor
-                        atom.setZValue(atom.z_3d)
-                        
-            for bond in all_bonds:
-                if hasattr(bond, "update_position"):
-                    bond.update_position()
-                if hasattr(bond.atom1, "z_3d") and hasattr(bond.atom2, "z_3d"):
-                    bond.setZValue((bond.atom1.z_3d + bond.atom2.z_3d) / 2.0)
-            
-            update_molecule_z_ranges(mw.scene)
-            mw.scene.update()
-    scale_slider.valueChanged.connect(on_scale_changed)
-    scale_layout.addWidget(scale_label); scale_layout.addWidget(scale_slider); scale_layout.addWidget(scale_value_label)
-    layout.addLayout(scale_layout)
+    # No more manual scaling to prevent Z-compression and unit mismatches
 
     ok_btn = QPushButton("OK"); ok_btn.clicked.connect(dlg.accept); layout.addWidget(ok_btn)
     dlg.exec()
@@ -405,71 +451,76 @@ def save_state():
         for aid, atom_data in mw.scene.data.atoms.items():
             item = atom_data.get('item')
             if item and not sip_isdeleted_safe(item) and hasattr(item, "z_3d"):
-                # Store unscaled Z to make it setting-independent
-                z_data[str(aid)] = item.z_3d / _3d_scale
+                # Save raw pixels for Z to match X/Y persistence in the core app.
+                # This ensures that rotations and positions are saved 1:1 without scaling artifacts.
+                z_data[str(aid)] = item.z_3d
         state["z_data"] = z_data
     return state
 
 def load_state(data):
-    global _depth_cue_strength, _3d_scale, _mw, _enabled, _context
+    global _mw, _depth_cue_strength, _3d_scale, _enabled, _context
     mw = _mw
-    if not mw: return
-    if data:
-        _depth_cue_strength = data.get("depth_cue_strength", 0.8)
-        _3d_scale = data.get("3d_scale", 50.0)
-        
-        # If the file has 3D data, we temporary enable the plugin if it's currently disabled.
-        has_3d_data = "z_data" in data and len(data["z_data"]) > 0
-        if has_3d_data and not _enabled:
-            # Temporary enable (do not change global _enabled setting)
-            print(f"[{PLUGIN_NAME}] 3D data found in project. Temporarily enabling plugin.")
-            # Delay slightly to ensure UI is ready
-            QTimer.singleShot(0, lambda: enable_plugin(mw, _context))
+    if not mw or not data: return
 
-        if "z_data" in data and mw.scene and hasattr(mw.scene, 'data'):
-            z_map = data["z_data"]
-            for aid_str, z in z_map.items():
+    _depth_cue_strength = data.get("depth_cue_strength", 0.8)
+    _3d_scale = data.get("3d_scale", 50.0)
+
+    # If the file has 3D data, we temporarily enable the plugin
+    has_3d_data = "z_data" in data and len(data["z_data"]) > 0
+    if has_3d_data and not _enabled:
+        QTimer.singleShot(0, lambda: enable_plugin(mw, _context))
+
+    z_data_to_restore = data.get("z_data", {})
+
+    # Ensure Z coordinates are present (either from z_data or the RDKit molecule)
+    def finalized_restore():
+        if not mw.scene: return
+        
+        # Phase 1: Restore Z from project data if available
+        if z_data_to_restore:
+            for aid_str, z in z_data_to_restore.items():
                 try:
                     aid = int(aid_str)
-                    # Robust lookup: Try data dict first
                     atom_data = None
                     if hasattr(mw.scene, 'data') and mw.scene.data:
                         atom_data = mw.scene.data.atoms.get(aid)
                     
-                    item = None
                     if atom_data and 'item' in atom_data:
                         item = atom_data['item']
-                    else:
-                        # Fallback: Search the scene for an AtomItem with this ID
-                        for i in mw.scene.items():
-                            if type(i).__name__ == "AtomItem" and getattr(i, "atom_id", None) == aid:
-                                item = i
-                                break
-                    
-                    if item and not sip_isdeleted_safe(item):
-                        # Re-scale based on the current _3d_scale
-                        item.z_3d = z * _3d_scale
-                        # White is back: Higher Z is closer
-                        item.setZValue(item.z_3d)
+                        if item and not sip_isdeleted_safe(item):
+                            item.z_3d = z
+                            item.setZValue(z)
                 except Exception: continue
-
-    # Ensure Z coordinates are present (either from z_data or the RDKit molecule)
-    def finalized_restore():
+        
+        # Phase 2: If no Z was restored, fallback to RDKit (but only if rotated state is also reset)
         if _rotate_tool_handler:
             _rotate_tool_handler.ensure_z_coords()
-        if mw.scene:
-            # Refresh all bonds and Z-order
-            _, _, all_bonds = find_molecules(mw.scene)
-            for bond in all_bonds:
-                bond.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
-                if hasattr(bond, "update_position"): bond.update_position()
-                if hasattr(bond.atom1, "z_3d") and hasattr(bond.atom2, "z_3d"):
-                    bond.setZValue((bond.atom1.z_3d + bond.atom2.z_3d) / 2.0)
             
-            update_molecule_z_ranges(mw.scene)
-            mw.scene.update()
+        # Phase 3: Refresh all bonds and Z-order
+        _, _, all_bonds = find_molecules(mw.scene)
+        for bond in all_bonds:
+            bond.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
+            if hasattr(bond, "update_position"): bond.update_position()
+            if hasattr(bond.atom1, "z_3d") and hasattr(bond.atom2, "z_3d"):
+                bond.setZValue((bond.atom1.z_3d + bond.atom2.z_3d) / 2.0)
+        
+        update_molecule_z_ranges(mw.scene)
+        mw.scene.update()
 
-    QTimer.singleShot(500, finalized_restore)
+    QTimer.singleShot(200, finalized_restore)
+
+def patched_on_calculation_finished(self, result):
+    """Hook to trigger plugin sync after 3D conversion finishes."""
+    from moleditpy.modules.main_window_compute import MainWindowCompute
+    if hasattr(MainWindowCompute, "_original_on_calculation_finished"):
+        MainWindowCompute._original_on_calculation_finished(self, result)
+    
+    global _enabled, _mw, _plugin_triggered_conversion
+    if _enabled and _mw == self and _plugin_triggered_conversion:
+        # Reset flag IMMEDIATELY to prevent loop re-entry
+        _plugin_triggered_conversion = False
+        # Defer slightly for core app UI cleanup
+        QTimer.singleShot(700, lambda: on_cleanup_triggered(allow_trigger=False))
 
 def toggle_monkey_patches(active, mw=None):
     from moleditpy.modules.atom_item import AtomItem
@@ -511,6 +562,12 @@ def toggle_monkey_patches(active, mw=None):
                     safe_flags = flags & ~QGraphicsItem.GraphicsItemFlag.ItemIsMovable
                     BondItem._original_setFlags(self, safe_flags)
                 BondItem.setFlags = bond_set_flags_guarded
+
+        # Patch MainWindowCompute to detect conversion finish
+        from moleditpy.modules.main_window_compute import MainWindowCompute
+        if not hasattr(MainWindowCompute, "_original_on_calculation_finished"):
+            MainWindowCompute._original_on_calculation_finished = MainWindowCompute.on_calculation_finished
+            MainWindowCompute.on_calculation_finished = patched_on_calculation_finished
  
             # Final guard: Override flags() to always return non-movable
             if not hasattr(BondItem, "_original_flags"):
@@ -533,6 +590,11 @@ def toggle_monkey_patches(active, mw=None):
                     if type(item).__name__ == "BondItem" and not sip_isdeleted_safe(item):
                         item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
     else:
+        from moleditpy.modules.main_window_compute import MainWindowCompute
+        if hasattr(MainWindowCompute, "_original_on_calculation_finished"):
+            MainWindowCompute.on_calculation_finished = MainWindowCompute._original_on_calculation_finished
+            delattr(MainWindowCompute, "_original_on_calculation_finished")
+
         if _original_atom_paint is not None:
             AtomItem.paint = _original_atom_paint
             _original_atom_paint = None
@@ -549,18 +611,16 @@ def patched_to_rdkit_mol(self, use_2d_stereo=True):
         # Use the plugin's _3d_scale to accurately convert back to angstroms
         scale = _3d_scale if abs(_3d_scale) > 1e-4 else 50.0
         for i in range(mol.GetNumAtoms()):
-            atom_rd = mol.GetAtomWithIdx(i)
-            if atom_rd.HasProp("_original_atom_id"):
-                aid = atom_rd.GetIntProp("_original_atom_id")
-                if aid in self.atoms:
-                    item = self.atoms[aid].get("item")
-                    if item and not sip_isdeleted_safe(item) and hasattr(item, "z_3d"):
-                        # Use current visual position (including rotation) for all coordinates
-                        pos_item = item.pos()
-                        ax = pos_item.x() / scale
-                        ay = -pos_item.y() / scale
-                        az = item.z_3d / scale
-                        conf.SetAtomPosition(i, Point3D(ax, ay, az))
+            aid = get_original_id(mol.GetAtomWithIdx(i))
+            if aid is not None and aid in self.atoms:
+                item = self.atoms[aid].get("item")
+                if item and not sip_isdeleted_safe(item) and hasattr(item, "z_3d"):
+                    # Use current visual position (including rotation) for all coordinates
+                    pos_item = item.pos()
+                    ax = pos_item.x() / scale
+                    ay = -pos_item.y() / scale
+                    az = item.z_3d / scale
+                    conf.SetAtomPosition(i, Point3D(ax, ay, az))
     return mol
 
 def patched_save_as_mol(self, *args, **kwargs):
@@ -744,13 +804,10 @@ def sync_to_3d_layout(mw, mol):
     # 1. Map original_id to 3D coordinates
     proj_coords = {}
     for i in range(mol.GetNumAtoms()):
-        atom = mol.GetAtomWithIdx(i)
-        p = conf.GetAtomPosition(i)
-        oid = None
-        if atom.HasProp("_original_atom_id"): oid = int(atom.GetProp("_original_atom_id"))
-        elif atom.HasProp("original_id"): oid = int(atom.GetProp("original_id"))
-        if oid is not None:
-            proj_coords[oid] = (p.x * scale, -p.y * scale, p.z * scale)
+        aid = get_original_id(mol.GetAtomWithIdx(i))
+        if aid is not None:
+            p = conf.GetAtomPosition(i)
+            proj_coords[aid] = (p.x * scale, -p.y * scale, p.z * scale)
 
     # 2. Find molecules in scene
     molecules, all_atoms, all_bonds = find_molecules(mw.scene)
@@ -855,14 +912,9 @@ class RotateToolHandler(QObject):
             # Create a lookup: original_id -> rdkit_index
             id_to_idx = {}
             for i in range(mol.GetNumAtoms()):
-                atom = mol.GetAtomWithIdx(i)
-                if atom.HasProp("_original_atom_id"):
-                    try:
-                        id_to_idx[atom.GetIntProp("_original_atom_id")] = i
-                    except Exception:
-                        try:
-                            id_to_idx[int(atom.GetProp("_original_atom_id"))] = i
-                        except Exception: pass
+                aid = get_original_id(mol.GetAtomWithIdx(i))
+                if aid is not None:
+                    id_to_idx[aid] = i
             
             for item in all_atoms:
                 aid = item.atom_id
