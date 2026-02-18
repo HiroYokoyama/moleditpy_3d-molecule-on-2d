@@ -17,7 +17,7 @@ from PyQt6.QtGui import QColor, QPen, QIcon, QAction, QActionGroup, QPainter, QB
 
 # Metadata
 PLUGIN_NAME = "3D Molecule on 2D"
-PLUGIN_VERSION = "1.2.1"
+PLUGIN_VERSION = "1.2.2"
 PLUGIN_AUTHOR = "HiroYokoyama"
 PLUGIN_DESCRIPTION = "Integrated 3D depth cues, rotation, and 3D-aware Mol export."
 
@@ -302,6 +302,10 @@ def enable_plugin(mw, context):
                 tb.addAction(act)
     
     if mw.scene:
+        for item in mw.scene.items():
+            # AtomItemとBondItemの両方に対し、Movableフラグを確実に立てる
+            if type(item).__name__ in ["AtomItem", "BondItem"]:
+                item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
         mw.scene.update()
 
 def disable_plugin(mw):
@@ -493,7 +497,7 @@ def load_state(data):
         # Phase 3: Refresh all bonds and Z-order
         _, _, all_bonds = find_molecules(mw.scene)
         for bond in all_bonds:
-            bond.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
+            #bond.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
             if hasattr(bond, "update_position"): bond.update_position()
             if hasattr(bond.atom1, "z_3d") and hasattr(bond.atom2, "z_3d"):
                 bond.setZValue((bond.atom1.z_3d + bond.atom2.z_3d) / 2.0)
@@ -536,14 +540,6 @@ def toggle_monkey_patches(active, mw=None):
         if not hasattr(MainWindowCompute, "_original_on_calculation_finished"):
             MainWindowCompute._original_on_calculation_finished = MainWindowCompute.on_calculation_finished
             MainWindowCompute.on_calculation_finished = patched_on_calculation_finished
- 
-            # Final guard: Override flags() to always return non-movable
-            if not hasattr(BondItem, "_original_flags"):
-                BondItem._original_flags = BondItem.flags
-                def bond_flags_guarded(self):
-                    f = BondItem._original_flags(self)
-                    return f & ~QGraphicsItem.GraphicsItemFlag.ItemIsMovable
-                BondItem.flags = bond_flags_guarded
  
             # Veto ItemPositionChange if it doesn't come from programmatic setPos
             if not hasattr(BondItem, "_original_itemChange"):
