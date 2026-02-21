@@ -1,10 +1,10 @@
 # 3D Molecule on 2D Plugin for MoleditPy
 
+This plugin enhances MoleditPy with integrated 3D depth cues, interactive 3D rotation within the 2D view, and 3D-aware data export.
+
 ![Plugin Preview](img/main.png)
 ![Plugin Preview 2](img/main2.png)
 ![With Reaction Sketcher](img/reaction_sketcher.png)
-
-This plugin enhances MoleditPy with integrated 3D depth cues, interactive 3D rotation within the 2D view, and 3D-aware data export.
 
 ## Features
 
