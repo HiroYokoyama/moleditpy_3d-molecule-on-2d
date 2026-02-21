@@ -4,6 +4,7 @@ import json
 import numpy as np
 try:
     from rdkit import Chem
+    from rdkit.Chem import AllChem
     from rdkit.Geometry import Point3D
 except ImportError:
     pass
@@ -11,13 +12,16 @@ try:
     from PyQt6 import sip
 except ImportError:
     import sip
-from PyQt6.QtWidgets import QMenu, QToolBar, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QPushButton, QGraphicsScene, QGraphicsItem, QCheckBox
-from PyQt6.QtCore import Qt, QPointF, QEvent, QObject, QTimer
+from PyQt6.QtWidgets import (QMenu, QToolBar, QDialog, QVBoxLayout, QHBoxLayout, 
+                             QLabel, QSlider, QPushButton, QGraphicsScene, 
+                             QGraphicsItem, QCheckBox, QApplication, QFrame, 
+                             QSpacerItem, QSizePolicy)
+from PyQt6.QtCore import Qt, QPointF, QEvent, QObject, QTimer, pyqtSignal, QThread
 from PyQt6.QtGui import QColor, QPen, QIcon, QAction, QActionGroup, QPainter, QBrush
 
 # Metadata
 PLUGIN_NAME = "3D Molecule on 2D"
-PLUGIN_VERSION = "1.2.2"
+PLUGIN_VERSION = "1.3.0"
 PLUGIN_AUTHOR = "HiroYokoyama"
 PLUGIN_DESCRIPTION = "Integrated 3D depth cues, rotation, and 3D-aware Mol export."
 
@@ -27,6 +31,9 @@ _show_depth_cues = True
 _rotate_tool_handler = None
 _depth_cue_strength = 0.8  # 0.0 to 1.0
 _3d_scale = 50.0           # Strictly matches 1.0 / ANGSTROM_PER_PIXEL (1.0 / 0.02 = 50)
+_embed_without_h = True    # New option: Default to True per user request
+_force_direct_mode = False # Force 2D-coordinate fallback
+_active_worker = None
 _mw = None
 _context = None
 _settings_file = os.path.splitext(os.path.abspath(__file__))[0] + ".json"
@@ -43,10 +50,13 @@ _is_syncing = False
 
 
 def blend_with_white(color, factor):
-    # Linearly interpolate color towards white.
-    r = int(color.red() + (255 - color.red()) * factor)
-    g = int(color.green() + (255 - color.green()) * factor)
-    b = int(color.blue() + (255 - color.blue()) * factor)
+    # Ensure factor is in [0, 1]
+    f = max(0.0, min(1.0, float(factor)))
+    # Ensure color is a QColor object
+    c = QColor(color)
+    r = int(c.red() + (255 - c.red()) * f)
+    g = int(c.green() + (255 - c.green()) * f)
+    b = int(c.blue() + (255 - c.blue()) * f)
     return QColor(r, g, b)
 
 def get_original_id(atom):
@@ -72,9 +82,72 @@ class PluginSettingsDialog(QDialog):
 
     def init_ui(self):
         layout = QVBoxLayout()
+        global _embed_without_h, _force_direct_mode, _depth_cue_strength, _3d_scale, _show_depth_cues
+
+        # 1. General
         self.chk_enable = QCheckBox("Enable Plugin")
         self.chk_enable.setChecked(self.enabled)
+        self.chk_enable.setStyleSheet("font-weight: bold;")
         layout.addWidget(self.chk_enable)
+
+        def add_separator():
+            line = QFrame()
+            line.setFrameShape(QFrame.Shape.HLine)
+            line.setFrameShadow(QFrame.Shadow.Sunken)
+            layout.addWidget(line)
+
+        add_separator()
+
+        # 2. Visuals
+        layout.addWidget(QLabel("<b>Visual Cues</b>"))
+        self.chk_depth_cues = QCheckBox("Show 3D Depth Cues (Whiting)")
+        self.chk_depth_cues.setChecked(_show_depth_cues)
+        layout.addWidget(self.chk_depth_cues)
+
+        sld_layout = QHBoxLayout()
+        sld_layout.addWidget(QLabel("  Strength:"))
+        self.sld_strength = QSlider(Qt.Orientation.Horizontal)
+        self.sld_strength.setRange(0, 100)
+        self.sld_strength.setValue(int(_depth_cue_strength * 100))
+        self.lbl_strength = QLabel(f"{self.sld_strength.value()}%")
+        self.sld_strength.valueChanged.connect(lambda v: self.lbl_strength.setText(f"{v}%"))
+        sld_layout.addWidget(self.sld_strength)
+        sld_layout.addWidget(self.lbl_strength)
+        layout.addLayout(sld_layout)
+
+        add_separator()
+
+        # 3. Embedding & Conversion
+        layout.addWidget(QLabel("<b>3D Embedding</b>"))
+        self.chk_embed_no_h = QCheckBox("Embed without Hydrogens (Cleaner)")
+        self.chk_embed_no_h.setChecked(_embed_without_h)
+        layout.addWidget(self.chk_embed_no_h)
+
+        self.chk_force_direct = QCheckBox("Force Direct Conversion")
+        self.chk_force_direct.setChecked(_force_direct_mode)
+        self.chk_force_direct.setEnabled(_embed_without_h)
+        self.chk_force_direct.setToolTip("Uses 2D coordinates directly. Only available if 'Embed without H' is active.")
+        layout.addWidget(self.chk_force_direct)
+        self.chk_embed_no_h.toggled.connect(self.chk_force_direct.setEnabled)
+
+        add_separator()
+
+        # 4. Geometry
+        layout.addWidget(QLabel("<b>Dimensions</b>"))
+        scale_layout = QHBoxLayout()
+        scale_layout.addWidget(QLabel("  3D-to-2D Scale:"))
+        self.sld_scale = QSlider(Qt.Orientation.Horizontal)
+        self.sld_scale.setRange(10, 200)
+        self.sld_scale.setValue(int(_3d_scale))
+        self.lbl_scale = QLabel(f"{self.sld_scale.value()}")
+        self.sld_scale.valueChanged.connect(lambda v: self.lbl_scale.setText(f"{v}"))
+        scale_layout.addWidget(self.sld_scale)
+        scale_layout.addWidget(self.lbl_scale)
+        layout.addLayout(scale_layout)
+
+        spacer = QSpacerItem(20, 10, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
+        layout.addItem(spacer)
+
         from PyQt6.QtWidgets import QDialogButtonBox
         btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         btns.accepted.connect(self.accept)
@@ -83,19 +156,29 @@ class PluginSettingsDialog(QDialog):
         self.setLayout(layout)
 
     def accept(self):
+        global _embed_without_h, _force_direct_mode, _depth_cue_strength, _3d_scale, _show_depth_cues
         self.enabled = self.chk_enable.isChecked()
+        _embed_without_h = self.chk_embed_no_h.isChecked()
+        _force_direct_mode = self.chk_force_direct.isChecked()
+        _show_depth_cues = self.chk_depth_cues.isChecked()
+        _depth_cue_strength = self.sld_strength.value() / 100.0
+        _3d_scale = float(self.sld_scale.value())
+        save_settings()
         super().accept()
 
 def load_settings():
-    global _enabled, _depth_cue_strength, _3d_scale
+    global _enabled, _depth_cue_strength, _3d_scale, _embed_without_h, _force_direct_mode, _show_depth_cues
     try:
         if os.path.exists(_settings_file):
             import json
             with open(_settings_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 _enabled = data.get('enabled', True)
+                _show_depth_cues = data.get('show_depth_cues', True)
                 _depth_cue_strength = data.get('depth_cue_strength', 0.8)
                 _3d_scale = data.get('3d_scale', 50.0)
+                _embed_without_h = data.get('embed_without_h', True)
+                _force_direct_mode = data.get('force_direct_mode', False)
     except Exception as e:
         print(f"[{PLUGIN_NAME}] Error loading settings: {e}")
 
@@ -104,8 +187,11 @@ def save_settings():
         import json
         data = {
             'enabled': _enabled,
+            'show_depth_cues': _show_depth_cues,
             'depth_cue_strength': _depth_cue_strength,
-            '3d_scale': _3d_scale
+            '3d_scale': _3d_scale,
+            'embed_without_h': _embed_without_h,
+            'force_direct_mode': _force_direct_mode
         }
         with open(_settings_file, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=4)
@@ -116,7 +202,7 @@ def on_cleanup_triggered(*args, allow_trigger=True, **kwargs):
     """
     Smart 3D Trigger with Recursion Guard.
     """
-    global _mw, _last_cleanup_trigger_time, _is_syncing
+    global _mw, _last_cleanup_trigger_time, _is_syncing, _embed_without_h, _force_direct_mode
     mw = _mw
     if not mw or not mw.scene: return
     if _is_syncing: return
@@ -157,6 +243,14 @@ def on_cleanup_triggered(*args, allow_trigger=True, **kwargs):
                         needs_3d_refresh = True
                         status_msg = f"Heavy atom mapping missing."
                         break
+                
+                # Check 3: If Embed without H is enabled, but molecule was embedded With H
+                if not needs_3d_refresh and _embed_without_h:
+                    # If it has hydrogens but lacks the "skeleton-first" marker
+                    if mol.GetNumAtoms() > mol.GetNumHeavyAtoms():
+                        if not mol.HasProp("_pme_skeleton_embedded"):
+                            needs_3d_refresh = True
+                            status_msg = "Standard H-embedding detected. Re-embedding without H..."
         
         # 2. Action Logic
         if needs_3d_refresh and allow_trigger:
@@ -167,12 +261,19 @@ def on_cleanup_triggered(*args, allow_trigger=True, **kwargs):
                 return
             
             _last_cleanup_trigger_time = now
-            mw.statusBar().showMessage(f"Smart 3D: {status_msg} Triggering Conversion...")
-            if hasattr(mw, "trigger_conversion"):
-                global _plugin_triggered_conversion
-                _plugin_triggered_conversion = True
-                mw.trigger_conversion()
-                return # Wait for conversion to finish
+            
+            # Branch logic: use local threaded embedding only if "without hydrogen" is specified.
+            # Otherwise, use the main application's standard conversion logic "as it did".
+            if _embed_without_h or _force_direct_mode:
+                mw.statusBar().showMessage(f"Smart 3D: {status_msg} Local Embedding starting (threaded)...")
+                start_local_embedding(mw, _embed_without_h, _force_direct_mode)
+            else:
+                mw.statusBar().showMessage(f"Smart 3D: {status_msg} Triggering Main Conversion...")
+                if hasattr(mw, "trigger_conversion"):
+                    global _plugin_triggered_conversion
+                    _plugin_triggered_conversion = True
+                    mw.trigger_conversion()
+            return # Wait for conversion to finish
         
         # 3. Perform Sync
         if mol and mol.GetNumConformers() > 0:
@@ -193,42 +294,10 @@ def on_cleanup_triggered(*args, allow_trigger=True, **kwargs):
         _rotate_tool_handler.rotate_act.setChecked(True)
 
 def show_settings_dialog(*args, **kwargs):
-    global _depth_cue_strength, _3d_scale, _mw
-    mw = _mw
-    if not mw: return
-    dlg = QDialog(mw)
-    dlg.setWindowTitle("Depth Cue Settings")
-    layout = QVBoxLayout(dlg)
-    depth_layout = QHBoxLayout()
-    depth_label = QLabel("Cue Strength:")
-    depth_value_label = QLabel(f"{int(_depth_cue_strength * 100)}%")
-    depth_slider = QSlider(Qt.Orientation.Horizontal)
-    depth_slider.setRange(0, 100)
-    depth_slider.setValue(int(_depth_cue_strength * 100))
-    def on_val_changed(v):
-        global _depth_cue_strength
-        _depth_cue_strength = v / 100.0
-        depth_value_label.setText(f"{v}%")
-        if mw.scene: mw.scene.update()
-    depth_slider.valueChanged.connect(on_val_changed)
-    depth_layout.addWidget(depth_label); depth_layout.addWidget(depth_slider); depth_layout.addWidget(depth_value_label)
-    layout.addLayout(depth_layout)
-    
-    # 3D Scale UI
-    scale_layout = QHBoxLayout()
-    scale_label = QLabel("3D Scale:")
-    scale_value_label = QLabel(f"{_3d_scale:.1f}")
-    scale_slider = QSlider(Qt.Orientation.Horizontal)
-    scale_slider.setRange(10, 100)
-    scale_slider.setValue(int(_3d_scale))
-    def on_scale_changed(v):
-        global _3d_scale
-        old_scale = _3d_scale
-        _3d_scale = float(v)
-    # No more manual scaling to prevent Z-compression and unit mismatches
-
-    ok_btn = QPushButton("OK"); ok_btn.clicked.connect(dlg.accept); layout.addWidget(ok_btn)
-    dlg.exec()
+    global _mw, _context
+    if _mw:
+        open_settings_dialog(_mw, _context)
+    # This consolidates toolbar and menu actions to the same unified dialog.
 
 def open_settings_dialog(mw, context):
     global _enabled
@@ -442,7 +511,8 @@ def save_state():
     if not mw: return {}
     state = {
         "depth_cue_strength": _depth_cue_strength,
-        "3d_scale": _3d_scale
+        "3d_scale": _3d_scale,
+        "embed_without_h": _embed_without_h
     }
     if mw.scene and hasattr(mw.scene, 'data'):
         z_data = {}
@@ -462,6 +532,7 @@ def load_state(data):
 
     _depth_cue_strength = data.get("depth_cue_strength", 0.8)
     _3d_scale = data.get("3d_scale", 50.0)
+    _embed_without_h = data.get("embed_without_h", False)
 
     # If the file has 3D data, we temporarily enable the plugin
     has_3d_data = "z_data" in data and len(data["z_data"]) > 0
@@ -635,7 +706,9 @@ def patched_atom_paint(self, painter, option, widget):
             
         z_range = z_max - z_min
         if _show_depth_cues and z_range > 1e-4:
+            # depth_factor: 1.0 (nearest) to 0.0 (farthest)
             depth_factor = (self.z_3d - z_min) / z_range
+            # DISTANT is whiter: factor=1.0 at z_min, factor=0.0 at z_max
             white_factor = (1.0 - depth_factor) * _depth_cue_strength
             
             if white_factor > 0.05:
@@ -673,7 +746,9 @@ def patched_bond_paint(self, painter, option, widget):
             
         z_range = z_max - z_min
         if _show_depth_cues and z_range > 1e-4:
+            # depth_factor: 1.0 (nearest) to 0.0 (farthest)
             depth_factor = (avg_z - z_min) / z_range
+            # DISTANT is whiter: factor=1.0 at z_min, factor=0.0 at z_max
             white_factor = (1.0 - depth_factor) * _depth_cue_strength
             
             if white_factor > 0.05:
@@ -749,9 +824,322 @@ def update_molecule_z_ranges(scene):
         zs = [getattr(a, "z_3d", 0.0) for a in mol_atoms]
         if not zs: continue
         z_min, z_max = min(zs), max(zs)
+        
+        # Calculate XY Footprint for proportional depth cue scaling
+        xs = [a.pos().x() for a in mol_atoms]
+        ys = [a.pos().y() for a in mol_atoms]
+        xy_range = max(max(xs)-min(xs), max(ys)-min(ys), 100.0)
+        
+        actual_depth = z_max - z_min
+        # User Feedback: Whiting should match molecule dimension (depth) and be visible.
+        # We use the actual depth as the range for maximum sensitivity.
+        # But we must avoid division by zero for perfectly flat mols.
+        ref_z_range = max(actual_depth, 20.0) 
+        
+        # User Feedback: "the top must be z=0" -> Reference point for NO whiting.
+        # We set mol_z_max = z_max. At z_max, depth_factor=1.0, so white_factor=0.0.
         for a in mol_atoms:
-            a.mol_z_min = z_min
             a.mol_z_max = z_max
+            a.mol_z_min = z_max - ref_z_range
+
+class LocalCalculationWorker(QObject):
+    finished = pyqtSignal(object)
+    status = pyqtSignal(str)
+    error = pyqtSignal(str)
+
+    def __init__(self, mol_block, embed_without_h, force_direct_mode, atom_ids):
+        super().__init__()
+        self.mol_block = mol_block
+        self.embed_without_h = embed_without_h
+        self.force_direct_mode = force_direct_mode
+        self.atom_ids = atom_ids
+
+    def run(self):
+        try:
+            self.status.emit("Calculating 3D structure...")
+            res = -1
+            
+            # 1. Convert 2D data to RDKit mol
+            # We use removeHs=False to maintain a stable 1:1 mapping with self.atom_ids
+            mol = Chem.MolFromMolBlock(self.mol_block, removeHs=False)
+            if not mol:
+                self.error.emit("Failed to create molecule structure.")
+                return
+
+            # Robust mapping: index -> original ID (stashed on atoms)
+            for i, aid in enumerate(self.atom_ids):
+                if i < mol.GetNumAtoms():
+                    mol.GetAtomWithIdx(i).SetIntProp("_original_atom_id", aid)
+            
+            # Prepare state for embedding
+            if self.embed_without_h:
+                mol = Chem.RemoveHs(mol)
+                # RemoveHs preserves Properties, so _original_atom_id is still there.
+
+            # Preserve explicit stereo information (E/Z)
+            explicit_stereo = {}
+            mol_lines = self.mol_block.split("\n")
+            for line in mol_lines:
+                if line.startswith("M  CFG"):
+                    parts = line.split()
+                    if len(parts) >= 4:
+                        try:
+                            bond_idx = int(parts[3]) - 1
+                            cfg_value = int(parts[4])
+                            if cfg_value == 1: explicit_stereo[bond_idx] = Chem.BondStereo.STEREOZ
+                            elif cfg_value == 2: explicit_stereo[bond_idx] = Chem.BondStereo.STEREOE
+                        except: continue
+
+            def apply_stereo(m, stereo_info):
+                for bidx, stype in stereo_info.items():
+                    if bidx < m.GetNumBonds():
+                        b = m.GetBondWithIdx(bidx)
+                        if b.GetBondType() == Chem.BondType.DOUBLE:
+                            begin = b.GetBeginAtom()
+                            end = b.GetEndAtom()
+                            bn = [n.GetIdx() for n in begin.GetNeighbors() if n.GetIdx() != end.GetIdx()]
+                            en = [n.GetIdx() for n in end.GetNeighbors() if n.GetIdx() != begin.GetIdx()]
+                            if bn and en:
+                                b.SetStereoAtoms(bn[0], en[0])
+                                b.SetStereo(stype)
+
+            # 2. Embedding process
+            params = AllChem.ETKDGv2()
+            params.randomSeed = 42
+            params.enforceChirality = True
+
+            if self.force_direct_mode:
+                self.status.emit("Force Direct Mode: Skipping RDKit embedding...")
+                res = -1
+            elif self.embed_without_h:
+                self.status.emit("Performing RDKit embedding...")
+                apply_stereo(mol, explicit_stereo)
+                res = AllChem.EmbedMolecule(mol, params)
+                if res == -1:
+                    params.useRandomCoords = True
+                    res = AllChem.EmbedMolecule(mol, params)
+                
+                if res != -1:
+                    self.status.emit("Placing hydrogens on 3D skeleton...")
+                    mol = Chem.AddHs(mol, addCoords=True)
+                    mol.SetIntProp("_pme_skeleton_embedded", 1)
+            else:
+                self.status.emit("Performing RDKit standard embedding...")
+                mol = Chem.AddHs(mol)
+                apply_stereo(mol, explicit_stereo)
+                res = AllChem.EmbedMolecule(mol, params)
+                if res == -1:
+                    params.useRandomCoords = True
+                    res = AllChem.EmbedMolecule(mol, params)
+
+            # Check if embedding actually succeeded in adding a conformer
+            if res == -1 or mol.GetNumConformers() == 0:
+                self.status.emit("Embedding failed. Using direct coordinate fallback...")
+                
+                # RECOVERY: Re-parse from mol_block to get fresh 2D coordinates.
+                # Hs are kept here to ensure _original_atom_id mapping is easy.
+                mol = Chem.MolFromMolBlock(self.mol_block, removeHs=False)
+                if mol is None:
+                    self.error.emit("3D embedding and fallback both failed.")
+                    return
+                
+                # Restore original IDs
+                for i, aid in enumerate(self.atom_ids):
+                    if i < mol.GetNumAtoms():
+                        mol.GetAtomWithIdx(i).SetIntProp("_original_atom_id", aid)
+
+                # If we are NOT in "Embed without H" mode, add them now for proper 3D placement
+                if not self.embed_without_h:
+                    mol = Chem.AddHs(mol)
+
+                # Need 2D coordinates for the "direct" method
+                if mol.GetNumConformers() == 0:
+                    AllChem.Compute2DCoords(mol)
+                
+                conf = mol.GetConformer()
+                
+                # 1. Try to break planarity using wedge/dash stereo bonds (like main app)
+                applied_stereo = False
+                for b in mol.GetBonds():
+                    bdir = b.GetBondDir()
+                    if bdir in [Chem.BondDir.BEGINWEDGE, Chem.BondDir.BEGINDASH]:
+                        idx = b.GetEndAtomIdx()
+                        cp = conf.GetAtomPosition(idx)
+                        offset = 1.5 if bdir == Chem.BondDir.BEGINWEDGE else -1.5
+                        conf.SetAtomPosition(idx, Point3D(cp.x, cp.y, cp.z + offset))
+                        applied_stereo = True
+                
+                # 2. If no stereo info, apply small random Z-jitter (±0.1 Å)
+                if not applied_stereo:
+                    rng = np.random.default_rng(seed=42)
+                    for i in range(mol.GetNumAtoms()):
+                        cp = conf.GetAtomPosition(i)
+                        jitter = (rng.random() - 0.5) * 0.2
+                        conf.SetAtomPosition(i, Point3D(cp.x, cp.y, cp.z + jitter))
+                
+                res = 0 # Proceed to optimization
+                
+                # If "Embed without H" is ON, we must remove them now for CLEAN optimization
+                if self.embed_without_h:
+                    mol = Chem.RemoveHs(mol)
+
+            # 3. Final Cleanup: Remove hydrogens if requested BEFORE optimization
+            if self.embed_without_h:
+                self.status.emit("Removing auxiliary hydrogens...")
+                mol = Chem.RemoveHs(mol)
+
+            # 4. Optimization
+            self.status.emit("Optimizing structure (MMFF94s)...")
+            try:
+                AllChem.MMFFOptimizeMolecule(mol, mmffVariant="MMFF94s")
+            except:
+                self.status.emit("Optimizing structure (UFF fallback)...")
+                try: AllChem.UFFOptimizeMolecule(mol)
+                except: pass
+
+            # 5. Final Push
+            self.status.emit("3D structure ready.")
+            self.finished.emit(mol)
+            
+        except Exception as e:
+            self.error.emit(str(e))
+
+def start_local_embedding(mw, embed_without_h=False, force_direct_mode=False):
+    """
+    Start local embedding in a background thread.
+    """
+    global _active_worker
+    if _active_worker:
+        return
+
+    mol_block = mw.data.to_mol_block()
+    if not mol_block:
+        return
+
+    atom_ids = list(mw.data.atoms.keys())
+    
+    # Setup thread and worker
+    thread = QThread()
+    worker = LocalCalculationWorker(mol_block, embed_without_h, force_direct_mode, atom_ids)
+    worker.moveToThread(thread)
+    
+    _active_worker = (thread, worker)
+    
+    # Connect signals
+    def update_ui_status(msg):
+        mw.statusBar().showMessage(msg)
+        if hasattr(mw, "_calculating_text_actor"):
+            try:
+                # Update text in the 3D window if it exists
+                mw._calculating_text_actor.SetInput(msg)
+                mw.plotter.render()
+            except: pass
+
+    thread.started.connect(worker.run)
+    worker.status.connect(update_ui_status)
+    worker.error.connect(lambda msg: on_embedding_error(mw, msg))
+    worker.finished.connect(lambda mol: on_embedding_finished(mw, mol))
+    
+    # Cleanup
+    worker.finished.connect(thread.quit)
+    worker.error.connect(thread.quit)
+    thread.finished.connect(thread.deleteLater)
+    worker.finished.connect(worker.deleteLater)
+    worker.error.connect(worker.deleteLater)
+    
+    def clear_active():
+        global _active_worker
+        _active_worker = None
+    thread.finished.connect(clear_active)
+    
+    # Show "Calculating..." overlay like the main app
+    if hasattr(mw, "plotter") and mw.plotter:
+        try:
+            mw.plotter.clear()
+            bg_color_hex = mw.settings.get("background_color", "#919191")
+            from PyQt6.QtGui import QColor
+            bg_qcolor = QColor(bg_color_hex)
+            luminance = bg_qcolor.toHsl().lightness() if bg_qcolor.isValid() else 255
+            text_color = "black" if luminance > 128 else "white"
+            
+            text_actor = mw.plotter.add_text(
+                "Calculating...",
+                position="lower_right",
+                font_size=15,
+                color=text_color,
+                name="calculating_text"
+            )
+            mw._calculating_text_actor = text_actor
+            mw.plotter.render()
+        except: pass
+
+    thread.start()
+
+def on_embedding_error(mw, msg):
+    # Remove overlay
+    if hasattr(mw, "plotter") and mw.plotter and hasattr(mw, "_calculating_text_actor"):
+        try:
+            mw.plotter.remove_actor(mw._calculating_text_actor)
+            mw.plotter.render()
+        except: pass
+    mw.statusBar().showMessage(f"Smart 3D Error: {msg}")
+
+def on_embedding_finished(mw, mol):
+    # Remove overlay
+    if hasattr(mw, "plotter") and mw.plotter and hasattr(mw, "_calculating_text_actor"):
+        try:
+            mw.plotter.remove_actor(mw._calculating_text_actor)
+            mw.plotter.render()
+        except: pass
+    
+    mw.current_mol = mol
+    
+    # CRITICAL APP STATE SYNC: Re-establish atom mapping and chiral labels before drawing.
+    if hasattr(mw, "create_atom_id_mapping"):
+        mw.create_atom_id_mapping()
+    if hasattr(mw, "update_chiral_labels"):
+        mw.update_chiral_labels()
+
+    # Update 3D viewer
+    if hasattr(mw, "draw_molecule_3d"):
+        mw.draw_molecule_3d(mol)
+    
+    # Perform Sync
+    sync_to_3d_layout(mw, mol)
+    # Ensure Z-ranges are calculated before re-painting
+    update_molecule_z_ranges(mw.scene)
+    
+    # Ensure the RDKit molecule is fully recognized as 3D by the app
+    if mol and mol.GetNumConformers() > 0:
+        mol.UpdatePropertyCache(False)
+        Chem.AssignStereochemistry(mol, force=True, cleanIt=True)
+
+    # CRITICAL APP STATE SYNC: Notify main application that 3D conversion is finished
+    if hasattr(mw, "push_undo_state"):
+        mw.push_undo_state()
+    if hasattr(mw, "_enable_3d_features"):
+        mw._enable_3d_features(True)
+    if hasattr(mw, "plotter") and mw.plotter:
+        try:
+            mw.plotter.reset_camera()
+            mw.plotter.render()
+        except: pass
+    if hasattr(mw, "setup_3d_hover"):
+        mw.setup_3d_hover()
+    if hasattr(mw, "view_2d"):
+        mw.view_2d.setFocus()
+    
+    mw.statusBar().showMessage("Smart 3D: Local Embedding and Sync completed.")
+    mw.scene.update()
+
+    # Re-enable and activate Rotate tool
+    global _rotate_tool_handler
+    if _rotate_tool_handler and hasattr(_rotate_tool_handler, "rotate_act") and _rotate_tool_handler.rotate_act:
+        try:
+            _rotate_tool_handler.rotate_act.setEnabled(True)
+            # Force a small delay to ensure the scene is ready for rotation
+            QTimer.singleShot(100, lambda: _rotate_tool_handler.rotate_act.setChecked(True))
+        except: pass
 
 # --- Logic ---
 
