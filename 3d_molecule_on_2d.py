@@ -873,7 +873,12 @@ class LocalCalculationWorker(QObject):
                 self.error.emit("3D embedding failed.")
                 return
 
-            # 3. Optimization
+            # 3. Final Cleanup: Remove hydrogens if requested BEFORE optimization
+            if self.embed_without_h:
+                self.status.emit("Removing auxiliary hydrogens...")
+                mol = Chem.RemoveHs(mol)
+
+            # 4. Optimization
             self.status.emit("Optimizing structure (MMFF94s)...")
             try:
                 AllChem.MMFFOptimizeMolecule(mol, mmffVariant="MMFF94s")
