@@ -4,6 +4,7 @@ import json
 import numpy as np
 try:
     from rdkit import Chem
+    from rdkit.Chem import AllChem
     from rdkit.Geometry import Point3D
 except ImportError:
     pass
@@ -11,13 +12,13 @@ try:
     from PyQt6 import sip
 except ImportError:
     import sip
-from PyQt6.QtWidgets import QMenu, QToolBar, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QPushButton, QGraphicsScene, QGraphicsItem, QCheckBox
-from PyQt6.QtCore import Qt, QPointF, QEvent, QObject, QTimer
+from PyQt6.QtWidgets import QMenu, QToolBar, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QPushButton, QGraphicsScene, QGraphicsItem, QCheckBox, QApplication
+from PyQt6.QtCore import Qt, QPointF, QEvent, QObject, QTimer, pyqtSignal, QThread
 from PyQt6.QtGui import QColor, QPen, QIcon, QAction, QActionGroup, QPainter, QBrush
 
 # Metadata
 PLUGIN_NAME = "3D Molecule on 2D"
-PLUGIN_VERSION = "1.2.2"
+PLUGIN_VERSION = "1.3.0"
 PLUGIN_AUTHOR = "HiroYokoyama"
 PLUGIN_DESCRIPTION = "Integrated 3D depth cues, rotation, and 3D-aware Mol export."
 
@@ -27,6 +28,8 @@ _show_depth_cues = True
 _rotate_tool_handler = None
 _depth_cue_strength = 0.8  # 0.0 to 1.0
 _3d_scale = 50.0           # Strictly matches 1.0 / ANGSTROM_PER_PIXEL (1.0 / 0.02 = 50)
+_embed_without_h = False   # New option
+_active_worker = None
 _mw = None
 _context = None
 _settings_file = os.path.splitext(os.path.abspath(__file__))[0] + ".json"
@@ -75,6 +78,13 @@ class PluginSettingsDialog(QDialog):
         self.chk_enable = QCheckBox("Enable Plugin")
         self.chk_enable.setChecked(self.enabled)
         layout.addWidget(self.chk_enable)
+
+        global _embed_without_h
+        self.chk_embed_no_h = QCheckBox("Embed without Hydrogens (Cleaner 3D)")
+        self.chk_embed_no_h.setChecked(_embed_without_h)
+        self.chk_embed_no_h.setToolTip("Embed heavy atoms first, then add hydrogens. Often results in cleaner/more symmetric structures.")
+        layout.addWidget(self.chk_embed_no_h)
+
         from PyQt6.QtWidgets import QDialogButtonBox
         btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         btns.accepted.connect(self.accept)
@@ -83,11 +93,14 @@ class PluginSettingsDialog(QDialog):
         self.setLayout(layout)
 
     def accept(self):
+        global _embed_without_h
         self.enabled = self.chk_enable.isChecked()
+        _embed_without_h = self.chk_embed_no_h.isChecked()
+        save_settings()
         super().accept()
 
 def load_settings():
-    global _enabled, _depth_cue_strength, _3d_scale
+    global _enabled, _depth_cue_strength, _3d_scale, _embed_without_h
     try:
         if os.path.exists(_settings_file):
             import json
@@ -96,6 +109,7 @@ def load_settings():
                 _enabled = data.get('enabled', True)
                 _depth_cue_strength = data.get('depth_cue_strength', 0.8)
                 _3d_scale = data.get('3d_scale', 50.0)
+                _embed_without_h = data.get('embed_without_h', False)
     except Exception as e:
         print(f"[{PLUGIN_NAME}] Error loading settings: {e}")
 
@@ -105,7 +119,8 @@ def save_settings():
         data = {
             'enabled': _enabled,
             'depth_cue_strength': _depth_cue_strength,
-            '3d_scale': _3d_scale
+            '3d_scale': _3d_scale,
+            'embed_without_h': _embed_without_h
         }
         with open(_settings_file, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=4)
@@ -167,12 +182,20 @@ def on_cleanup_triggered(*args, allow_trigger=True, **kwargs):
                 return
             
             _last_cleanup_trigger_time = now
-            mw.statusBar().showMessage(f"Smart 3D: {status_msg} Triggering Conversion...")
-            if hasattr(mw, "trigger_conversion"):
-                global _plugin_triggered_conversion
-                _plugin_triggered_conversion = True
-                mw.trigger_conversion()
-                return # Wait for conversion to finish
+            
+            # Branch logic: use local threaded embedding only if "without hydrogen" is specified.
+            # Otherwise, use the main application's standard conversion logic "as it did".
+            global _embed_without_h
+            if _embed_without_h:
+                mw.statusBar().showMessage(f"Smart 3D: {status_msg} Local Embedding starting (threaded)...")
+                start_local_embedding(mw, _embed_without_h)
+            else:
+                mw.statusBar().showMessage(f"Smart 3D: {status_msg} Triggering Main Conversion...")
+                if hasattr(mw, "trigger_conversion"):
+                    global _plugin_triggered_conversion
+                    _plugin_triggered_conversion = True
+                    mw.trigger_conversion()
+            return # Wait for conversion to finish
         
         # 3. Perform Sync
         if mol and mol.GetNumConformers() > 0:
@@ -214,6 +237,18 @@ def show_settings_dialog(*args, **kwargs):
     depth_layout.addWidget(depth_label); depth_layout.addWidget(depth_slider); depth_layout.addWidget(depth_value_label)
     layout.addLayout(depth_layout)
     
+    global _embed_without_h
+    h_layout = QHBoxLayout()
+    h_checkbox = QCheckBox("Embed without Hydrogens")
+    h_checkbox.setChecked(_embed_without_h)
+    def on_h_toggled(checked):
+        global _embed_without_h
+        _embed_without_h = checked
+        save_settings()
+    h_checkbox.toggled.connect(on_h_toggled)
+    h_layout.addWidget(h_checkbox)
+    layout.addLayout(h_layout)
+
     # 3D Scale UI
     scale_layout = QHBoxLayout()
     scale_label = QLabel("3D Scale:")
@@ -442,7 +477,8 @@ def save_state():
     if not mw: return {}
     state = {
         "depth_cue_strength": _depth_cue_strength,
-        "3d_scale": _3d_scale
+        "3d_scale": _3d_scale,
+        "embed_without_h": _embed_without_h
     }
     if mw.scene and hasattr(mw.scene, 'data'):
         z_data = {}
@@ -462,6 +498,7 @@ def load_state(data):
 
     _depth_cue_strength = data.get("depth_cue_strength", 0.8)
     _3d_scale = data.get("3d_scale", 50.0)
+    _embed_without_h = data.get("embed_without_h", False)
 
     # If the file has 3D data, we temporarily enable the plugin
     has_3d_data = "z_data" in data and len(data["z_data"]) > 0
@@ -752,6 +789,202 @@ def update_molecule_z_ranges(scene):
         for a in mol_atoms:
             a.mol_z_min = z_min
             a.mol_z_max = z_max
+
+class LocalCalculationWorker(QObject):
+    finished = pyqtSignal(object)
+    status = pyqtSignal(str)
+    error = pyqtSignal(str)
+
+    def __init__(self, mol_block, embed_without_h, atom_ids):
+        super().__init__()
+        self.mol_block = mol_block
+        self.embed_without_h = embed_without_h
+        self.atom_ids = atom_ids
+
+    def run(self):
+        try:
+            self.status.emit("Calculating 3D structure...")
+            
+            # 1. Convert 2D data to RDKit mol
+            mol = Chem.MolFromMolBlock(self.mol_block, removeHs=True)
+            if not mol:
+                self.error.emit("Failed to create molecule structure.")
+                return
+
+            # Ensure original IDs are preserved
+            # Map by index as a fallback (MolFromMolBlock usually preserves order)
+            for i, aid in enumerate(self.atom_ids):
+                if i < mol.GetNumAtoms():
+                    mol.GetAtomWithIdx(i).SetIntProp("_original_atom_id", aid)
+
+            # Preserve explicit stereo information (E/Z)
+            explicit_stereo = {}
+            mol_lines = self.mol_block.split("\n")
+            for line in mol_lines:
+                if line.startswith("M  CFG"):
+                    parts = line.split()
+                    if len(parts) >= 4:
+                        try:
+                            bond_idx = int(parts[3]) - 1
+                            cfg_value = int(parts[4])
+                            if cfg_value == 1: explicit_stereo[bond_idx] = Chem.BondStereo.STEREOZ
+                            elif cfg_value == 2: explicit_stereo[bond_idx] = Chem.BondStereo.STEREOE
+                        except: continue
+
+            def apply_stereo(m, stereo_info):
+                for bidx, stype in stereo_info.items():
+                    if bidx < m.GetNumBonds():
+                        b = m.GetBondWithIdx(bidx)
+                        if b.GetBondType() == Chem.BondType.DOUBLE:
+                            begin = b.GetBeginAtom()
+                            end = b.GetEndAtom()
+                            bn = [n.GetIdx() for n in begin.GetNeighbors() if n.GetIdx() != end.GetIdx()]
+                            en = [n.GetIdx() for n in end.GetNeighbors() if n.GetIdx() != begin.GetIdx()]
+                            if bn and en:
+                                b.SetStereoAtoms(bn[0], en[0])
+                                b.SetStereo(stype)
+
+            # 2. Embedding process
+            params = AllChem.ETKDGv2()
+            params.randomSeed = 42
+            params.enforceChirality = True
+
+            if self.embed_without_h:
+                self.status.emit("Performing RDKit embedding (skeleton first)...")
+                apply_stereo(mol, explicit_stereo)
+                res = AllChem.EmbedMolecule(mol, params)
+                if res == -1:
+                    params.useRandomCoords = True
+                    res = AllChem.EmbedMolecule(mol, params)
+                
+                if res != -1:
+                    self.status.emit("Placing hydrogens on 3D skeleton...")
+                    mol = Chem.AddHs(mol, addCoords=True)
+            else:
+                self.status.emit("Performing RDKit standard embedding...")
+                mol = Chem.AddHs(mol)
+                apply_stereo(mol, explicit_stereo)
+                res = AllChem.EmbedMolecule(mol, params)
+                if res == -1:
+                    params.useRandomCoords = True
+                    res = AllChem.EmbedMolecule(mol, params)
+
+            if res == -1:
+                self.error.emit("3D embedding failed.")
+                return
+
+            # 3. Optimization
+            self.status.emit("Optimizing structure (MMFF94s)...")
+            try:
+                AllChem.MMFFOptimizeMolecule(mol, mmffVariant="MMFF94s")
+            except:
+                self.status.emit("Optimizing structure (UFF fallback)...")
+                try: AllChem.UFFOptimizeMolecule(mol)
+                except: pass
+
+            self.status.emit("3D structure ready.")
+            self.finished.emit(mol)
+            
+        except Exception as e:
+            self.error.emit(str(e))
+
+def start_local_embedding(mw, embed_without_h=False):
+    """
+    Start local embedding in a background thread.
+    """
+    global _active_worker
+    if _active_worker:
+        return
+
+    mol_block = mw.data.to_mol_block()
+    if not mol_block:
+        return
+
+    atom_ids = list(mw.data.atoms.keys())
+    
+    # Setup thread and worker
+    thread = QThread()
+    worker = LocalCalculationWorker(mol_block, embed_without_h, atom_ids)
+    worker.moveToThread(thread)
+    
+    _active_worker = (thread, worker)
+    
+    # Connect signals
+    def update_ui_status(msg):
+        mw.statusBar().showMessage(msg)
+        if hasattr(mw, "_calculating_text_actor"):
+            try:
+                # Update text in the 3D window if it exists
+                mw._calculating_text_actor.SetInput(msg)
+                mw.plotter.render()
+            except: pass
+
+    thread.started.connect(worker.run)
+    worker.status.connect(update_ui_status)
+    worker.error.connect(lambda msg: on_embedding_error(mw, msg))
+    worker.finished.connect(lambda mol: on_embedding_finished(mw, mol))
+    
+    # Cleanup
+    worker.finished.connect(thread.quit)
+    worker.error.connect(thread.quit)
+    thread.finished.connect(thread.deleteLater)
+    worker.finished.connect(worker.deleteLater)
+    worker.error.connect(worker.deleteLater)
+    
+    def clear_active():
+        global _active_worker
+        _active_worker = None
+    thread.finished.connect(clear_active)
+    
+    # Show "Calculating..." overlay like the main app
+    if hasattr(mw, "plotter") and mw.plotter:
+        try:
+            mw.plotter.clear()
+            bg_color_hex = mw.settings.get("background_color", "#919191")
+            from PyQt6.QtGui import QColor
+            bg_qcolor = QColor(bg_color_hex)
+            luminance = bg_qcolor.toHsl().lightness() if bg_qcolor.isValid() else 255
+            text_color = "black" if luminance > 128 else "white"
+            
+            text_actor = mw.plotter.add_text(
+                "Calculating...",
+                position="lower_right",
+                font_size=15,
+                color=text_color,
+                name="calculating_text"
+            )
+            mw._calculating_text_actor = text_actor
+            mw.plotter.render()
+        except: pass
+
+    thread.start()
+
+def on_embedding_error(mw, msg):
+    # Remove overlay
+    if hasattr(mw, "plotter") and mw.plotter and hasattr(mw, "_calculating_text_actor"):
+        try:
+            mw.plotter.remove_actor(mw._calculating_text_actor)
+            mw.plotter.render()
+        except: pass
+    mw.statusBar().showMessage(f"Smart 3D Error: {msg}")
+
+def on_embedding_finished(mw, mol):
+    # Remove overlay
+    if hasattr(mw, "plotter") and mw.plotter and hasattr(mw, "_calculating_text_actor"):
+        try:
+            mw.plotter.remove_actor(mw._calculating_text_actor)
+            mw.plotter.render()
+        except: pass
+    
+    mw.current_mol = mol
+    # Update 3D viewer
+    if hasattr(mw, "draw_molecule_3d"):
+        mw.draw_molecule_3d(mol)
+    
+    # Perform Sync
+    sync_to_3d_layout(mw, mol)
+    mw.statusBar().showMessage("Smart 3D: Local Embedding and Sync completed.")
+    mw.scene.update()
 
 # --- Logic ---
 
