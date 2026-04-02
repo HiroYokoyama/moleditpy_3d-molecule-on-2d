@@ -21,9 +21,9 @@ from PyQt6.QtGui import QColor, QPen, QIcon, QAction, QActionGroup, QPainter, QB
 
 # Metadata
 PLUGIN_NAME = "3D Molecule on 2D"
-PLUGIN_VERSION = "1.3.0"
+PLUGIN_VERSION = "2.0.0"
 PLUGIN_AUTHOR = "HiroYokoyama"
-PLUGIN_DESCRIPTION = "Integrated 3D depth cues, rotation, and 3D-aware Mol export."
+PLUGIN_DESCRIPTION = "Integrated 3D depth cues, rotation, and 3D-aware Mol export. Refactored for V3 API."
 
 # Global state
 _enabled = True
@@ -37,6 +37,7 @@ _active_worker = None
 _mw = None
 _context = None
 _settings_file = os.path.splitext(os.path.abspath(__file__))[0] + ".json"
+_plugin_menu_action = None  # QAction reference for Plugin menu entry
 
 # Store original paint methods
 _original_atom_paint = None
@@ -202,8 +203,9 @@ def on_cleanup_triggered(*args, allow_trigger=True, **kwargs):
     """
     Smart 3D Trigger with Recursion Guard.
     """
-    global _mw, _last_cleanup_trigger_time, _is_syncing, _embed_without_h, _force_direct_mode
+    global _mw, _context, _last_cleanup_trigger_time, _is_syncing, _embed_without_h, _force_direct_mode
     mw = _mw
+    context = _context
     if not mw or not mw.scene: return
     if _is_syncing: return
     
@@ -212,7 +214,7 @@ def on_cleanup_triggered(*args, allow_trigger=True, **kwargs):
         # 0. Detect molecules in the scene
         molecules, all_atoms, all_bonds = find_molecules(mw.scene)
         if not molecules:
-            mw.statusBar().showMessage("No molecules in scene.")
+            context.show_status_message("No molecules in scene.")
             return
 
         # 1. Determine if we NEED a 3D refresh
@@ -265,25 +267,26 @@ def on_cleanup_triggered(*args, allow_trigger=True, **kwargs):
             # Branch logic: use local threaded embedding only if "without hydrogen" is specified.
             # Otherwise, use the main application's standard conversion logic "as it did".
             if _embed_without_h or _force_direct_mode:
-                mw.statusBar().showMessage(f"Smart 3D: {status_msg} Local Embedding starting (threaded)...")
+                context.show_status_message(f"Smart 3D: {status_msg} Local Embedding starting (threaded)...")
                 start_local_embedding(mw, _embed_without_h, _force_direct_mode)
             else:
-                mw.statusBar().showMessage(f"Smart 3D: {status_msg} Triggering Main Conversion...")
+                context.show_status_message(f"Smart 3D: {status_msg} Triggering Main Conversion...")
                 if hasattr(mw, "trigger_conversion"):
                     global _plugin_triggered_conversion
                     _plugin_triggered_conversion = True
-                    mw.trigger_conversion()
+                    # # [DIRECT ACCESS] to core calculation trigger
+                    mw.compute_manager.trigger_conversion()
             return # Wait for conversion to finish
         
         # 3. Perform Sync
         if mol and mol.GetNumConformers() > 0:
             if needs_3d_refresh:
-                mw.statusBar().showMessage("Smart 3D: Syncing whatever available...")
+                context.show_status_message("Smart 3D: Syncing whatever available...")
             else:
-                mw.statusBar().showMessage("Smart 3D: Syncing layout to 3D...")
+                context.show_status_message("Smart 3D: Syncing layout to 3D...")
             sync_to_3d_layout(mw, mol)
         else:
-            mw.statusBar().showMessage("Smart 3D: Conversion needed for synchronization.")
+            context.show_status_message("Smart 3D: Conversion needed for synchronization.")
     finally:
         _is_syncing = False
     
@@ -303,15 +306,21 @@ def open_settings_dialog(mw, context):
     global _enabled
     dlg = PluginSettingsDialog(mw, _enabled)
     if dlg.exec():
+        changed = False
         if _enabled != dlg.enabled:
             _enabled = dlg.enabled
+            changed = True
             save_settings()
             if _enabled:
                 enable_plugin(mw, context)
             else:
                 disable_plugin(mw)
             status = "Enabled" if _enabled else "Disabled"
-            mw.statusBar().showMessage(f"{PLUGIN_NAME}: {status}")
+            context.show_status_message(f"{PLUGIN_NAME}: {status}")
+        # Hot-reload any toolbar state so the actions reflect the current setting
+        refresh_plugin_toolbar(mw, context)
+        if not changed:
+            save_settings()
 
 def initialize(context):
     global _mw, _settings_file, _enabled, _context
@@ -325,81 +334,123 @@ def initialize(context):
     
     load_settings()
     
-    # Register Setting Menu
-    context.add_menu_action("Settings/3D Molecule on 2D...", 
-                          lambda: open_settings_dialog(mw, context))
+    # Register Setting Menu (always — needed to re-enable the plugin)
+    context.add_menu_action("Settings/3D Molecule on 2D...",
+                            lambda: open_settings_dialog(mw, context))
 
-    # Register Toolbar Actions (Standard registration)
-    context.add_toolbar_action(on_cleanup_triggered, "Clean Up 3D", tooltip="Sync 2D layout to 3D")
-    context.add_toolbar_action(lambda: None, "Rotate 3D", tooltip="Rotate molecule in 3D")
-    context.add_toolbar_action(show_settings_dialog, "3D on 2D Settings...", tooltip="Fine-tune visuals")
     # Register Save/Load handlers for project file persistence
     context.register_save_handler(save_state)
     context.register_load_handler(load_state)
 
-    def startup_fix():
-        # First capture the actions that were just registered
-        configure_actions()
-        if _enabled:
-            # enable_plugin will activate patches and configure actions properly
-            enable_plugin(mw, context)
-        else:
-            # disable_plugin will hide the actions we just found
-            disable_plugin(mw)
+    # Only register toolbar actions if the plugin is enabled at startup.
+    # This prevents the toolbar from flashing visible then hiding via QTimer.
+    if _enabled:
+        context.add_toolbar_action(on_cleanup_triggered, "Clean Up 3D", tooltip="Sync 2D layout to 3D")
+        context.add_toolbar_action(lambda: None, "Rotate 3D", tooltip="Rotate molecule in 3D")
+        context.add_toolbar_action(show_settings_dialog, "3D on 2D Settings...", tooltip="Fine-tune visuals")
 
-    # Avoid immediate UI interference, let the app finish startup
+    def startup_fix():
+        global _plugin_menu_action
+        # Locate and store the Plugin menu action reference, then set initial enabled state
+        _plugin_menu_action = _find_menu_action(mw, _PLUGIN_MENU_ACTION_TEXT)
+        if _enabled:
+            enable_plugin(mw, context)
+
     QTimer.singleShot(0, startup_fix)
 
 def enable_plugin(mw, context):
-    global _rotate_tool_handler
+    global _rotate_tool_handler, _plugin_menu_action
     if not _rotate_tool_handler:
         _rotate_tool_handler = RotateToolHandler(mw)
-    
+
     toggle_monkey_patches(True, mw)
     patch_export_logic(True)
-    
-    tb = getattr(mw, 'plugin_toolbar', None)
-    if not tb: return
-    
+
+    # Re-register toolbar actions with the plugin_manager if they were
+    # never registered (plugin was disabled at startup) or were removed.
+    pm = getattr(mw, 'plugin_manager', None)
+    if pm and hasattr(pm, 'toolbar_actions'):
+        already = any(a.get('text') in _OWN_ACTION_TEXTS for a in pm.toolbar_actions)
+        if not already:
+            context.add_toolbar_action(on_cleanup_triggered, "Clean Up 3D", tooltip="Sync 2D layout to 3D")
+            context.add_toolbar_action(lambda: None, "Rotate 3D", tooltip="Rotate molecule in 3D")
+            context.add_toolbar_action(show_settings_dialog, "3D on 2D Settings...", tooltip="Fine-tune visuals")
+
+    refresh_plugin_toolbar(mw, context)
     configure_actions()
-    
-    # Ensure actions are in the toolbar (they might have been removed by disable_plugin)
-    if _toolbar_actions_objs:
-        tb.show()
-        for act in _toolbar_actions_objs:
-            if act not in tb.actions():
-                tb.addAction(act)
-    
+
     if mw.scene:
         for item in mw.scene.items():
-            # AtomItemとBondItemの両方に対し、Movableフラグを確実に立てる
             if type(item).__name__ in ["AtomItem", "BondItem"]:
                 item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
         mw.scene.update()
 
+_OWN_ACTION_TEXTS = {"Clean Up 3D", "Rotate 3D", "3D on 2D Settings..."}
+
+_PLUGIN_MENU_ACTION_TEXT = "3D Molecule on 2D..."
+
+def _find_menu_action(mw, text):
+    """Recursively find a QAction by text in the menu bar."""
+    def _search(menu):
+        for a in menu.actions():
+            if a.text() == text:
+                return a
+            if a.menu():
+                found = _search(a.menu())
+                if found:
+                    return found
+        return None
+    for a in mw.menuBar().actions():
+        if a.menu():
+            found = _search(a.menu())
+            if found:
+                return found
+    return None
+
 def disable_plugin(mw):
+    global _toolbar_actions_objs, _plugin_menu_action
     toggle_monkey_patches(False, mw)
     patch_export_logic(False)
     if _rotate_tool_handler:
         _rotate_tool_handler.set_active(False)
-    
-    # Remove from toolbar
-    tb = getattr(mw, 'plugin_toolbar', None)
+
+    # Remove from plugin_manager's registered list so _add_plugin_toolbar_actions
+    # won't re-add them if the toolbar is rebuilt while disabled.
+    pm = getattr(mw, 'plugin_manager', None)
+    if pm and hasattr(pm, 'toolbar_actions'):
+        pm.toolbar_actions = [a for a in pm.toolbar_actions
+                              if a.get('text') not in _OWN_ACTION_TEXTS]
+
+    # Remove from toolbar — search by text so stale object refs don't matter
+    tb = getattr(getattr(mw, 'init_manager', None), 'plugin_toolbar', None)
     if tb:
-        for act in _toolbar_actions_objs:
-            tb.removeAction(act)
-        # If toolbar is now essentially empty (only our actions were removed), hide it
-        # Note: tb.actions() might still have separators or other plugins' actions
+        for act in list(tb.actions()):
+            if act.text() in _OWN_ACTION_TEXTS:
+                tb.removeAction(act)
+        _toolbar_actions_objs = []
+        # Hide toolbar if nothing non-separator remains
         if not any(not a.isSeparator() for a in tb.actions()):
             tb.hide()
-    
+
     if mw.scene:
         mw.scene.update()
+
+def refresh_plugin_toolbar(mw, context):
+    tb = getattr(getattr(mw, 'init_manager', None), 'plugin_toolbar', None)
+    if not tb:
+        return
+
+    # Rebuild the toolbar from the plugin_manager's registered list
+    if hasattr(mw, 'init_manager') and hasattr(mw.init_manager, '_add_plugin_toolbar_actions'):
+        mw.init_manager._add_plugin_toolbar_actions()
+
+    tb.show()
+    configure_actions()
 
 def configure_actions():
     global _mw, _toolbar_actions_objs
     mw = _mw
-    tb = getattr(mw, 'plugin_toolbar', None)
+    tb = getattr(getattr(mw, 'init_manager', None), 'plugin_toolbar', None)
     if not tb: return
     
     # Filter for our actions in the toolbar
@@ -452,9 +503,9 @@ def on_rotate_toggled(checked):
         if _rotate_tool_handler:
             _rotate_tool_handler.set_active(False)
         # Default back to select mode if we are turning off rotation
-        if hasattr(mw, "mode_actions") and "select" in mw.mode_actions:
-            mw.mode_actions["select"].setChecked(True)
-            mw.set_mode("select")
+        if hasattr(mw.init_manager, "mode_actions") and "select" in mw.init_manager.mode_actions:
+            mw.init_manager.mode_actions["select"].setChecked(True)
+            mw.ui_manager.set_mode("select")
     
     # --- Undo/Redo Sync ---
     def on_undo_redo_changed():
@@ -478,29 +529,30 @@ def on_rotate_toggled(checked):
 
     try:
         # Check if undo_stack is a list or a QUndoStack
-        stack = getattr(mw, "undo_stack", getattr(mw, "undoStack", None))
+        stack = getattr(mw.edit_actions_manager, "undo_stack", getattr(mw.edit_actions_manager, "undoStack", None))
         if hasattr(stack, "indexChanged"):
             stack.indexChanged.connect(lambda idx: on_undo_redo_changed())
         else:
             # Fallback to monkeypatching if it's a list or doesn't have indexChanged
-            orig_undo = getattr(mw, "undo", None)
+            orig_undo = getattr(mw.edit_actions_manager, "undo", None)
             if orig_undo and callable(orig_undo) and not hasattr(orig_undo, "_is_patched"):
                 def patched_undo(*args, **kwargs):
                     res = orig_undo(*args, **kwargs)
                     on_undo_redo_changed()
                     return res
                 patched_undo._is_patched = True
-                mw.undo = patched_undo
+                mw.edit_actions_manager.undo = patched_undo
             
-            orig_redo = getattr(mw, "redo", None)
+            orig_redo = getattr(mw.edit_actions_manager, "redo", None)
             if orig_redo and callable(orig_redo) and not hasattr(orig_redo, "_is_patched"):
                 def patched_redo(*args, **kwargs):
                     res = orig_redo(*args, **kwargs)
                     on_undo_redo_changed()
                     return res
                 patched_redo._is_patched = True
-                mw.redo = patched_redo
+                mw.edit_actions_manager.redo = patched_redo
     except Exception as e:
+        _context.show_status_message(f"[{PLUGIN_NAME}] Warning: Could not hook into undo/redo system.")
         print(f"[{PLUGIN_NAME}] Warning: Could not hook into undo/redo system: {e}")
 
 # --- Persistence ---
@@ -580,7 +632,7 @@ def load_state(data):
 
 def patched_on_calculation_finished(self, result):
     """Hook to trigger plugin sync after 3D conversion finishes."""
-    from moleditpy.modules.main_window_compute import MainWindowCompute
+    from moleditpy.ui.compute_logic import ComputeManager as MainWindowCompute
     if hasattr(MainWindowCompute, "_original_on_calculation_finished"):
         MainWindowCompute._original_on_calculation_finished(self, result)
     
@@ -592,8 +644,8 @@ def patched_on_calculation_finished(self, result):
         QTimer.singleShot(700, lambda: on_cleanup_triggered(allow_trigger=False))
 
 def toggle_monkey_patches(active, mw=None):
-    from moleditpy.modules.atom_item import AtomItem
-    from moleditpy.modules.bond_item import BondItem
+    from moleditpy.ui.atom_item import AtomItem
+    from moleditpy.ui.bond_item import BondItem
     global _original_atom_paint, _original_bond_paint, _show_depth_cues
     
     _show_depth_cues = active
@@ -602,12 +654,12 @@ def toggle_monkey_patches(active, mw=None):
             _original_atom_paint = AtomItem.paint
             AtomItem.paint = patched_atom_paint
         if _original_bond_paint is None:
-            from moleditpy.modules.bond_item import BondItem
+            from moleditpy.ui.bond_item import BondItem
             _original_bond_paint = BondItem.paint
             BondItem.paint = patched_bond_paint
             
         # Patch MainWindowCompute to detect conversion finish
-        from moleditpy.modules.main_window_compute import MainWindowCompute
+        from moleditpy.ui.compute_logic import ComputeManager as MainWindowCompute
         if not hasattr(MainWindowCompute, "_original_on_calculation_finished"):
             MainWindowCompute._original_on_calculation_finished = MainWindowCompute.on_calculation_finished
             MainWindowCompute.on_calculation_finished = patched_on_calculation_finished
@@ -620,7 +672,7 @@ def toggle_monkey_patches(active, mw=None):
                 BondItem.itemChange = bond_item_change_guarded
 
     else:
-        from moleditpy.modules.main_window_compute import MainWindowCompute
+        from moleditpy.ui.compute_logic import ComputeManager as MainWindowCompute
         if hasattr(MainWindowCompute, "_original_on_calculation_finished"):
             MainWindowCompute.on_calculation_finished = MainWindowCompute._original_on_calculation_finished
             delattr(MainWindowCompute, "_original_on_calculation_finished")
@@ -655,7 +707,7 @@ def patched_to_rdkit_mol(self, use_2d_stereo=True):
 
 def patched_save_as_mol(self, *args, **kwargs):
     global _export_in_progress
-    from moleditpy.modules.main_window_molecular_parsers import MainWindowMolecularParsers
+    from moleditpy.ui.io_logic import IOManager as MainWindowMolecularParsers
     _export_in_progress = True
     try:
         if hasattr(MainWindowMolecularParsers, "_original_save_as_mol") and MainWindowMolecularParsers._original_save_as_mol:
@@ -666,8 +718,8 @@ def patched_save_as_mol(self, *args, **kwargs):
 
 def patch_export_logic(active=True):
     """Monkey patch MolecularData and Parsers for 3D-aware Mol export."""
-    from moleditpy.modules.molecular_data import MolecularData
-    from moleditpy.modules.main_window_molecular_parsers import MainWindowMolecularParsers
+    from moleditpy.core.molecular_data import MolecularData
+    from moleditpy.ui.io_logic import IOManager as MainWindowMolecularParsers
     
     if active:
         # Patch to_rdkit_mol (data layer)
@@ -694,7 +746,7 @@ def patch_export_logic(active=True):
 
 def patched_atom_paint(self, painter, option, widget):
     global _show_depth_cues, _depth_cue_strength, _original_atom_paint
-    from moleditpy.modules import atom_item
+    from moleditpy.ui import atom_item
     
     if _show_depth_cues and hasattr(self, "z_3d") and self.scene():
         # Use per-molecule range if available, else scene range
@@ -754,14 +806,14 @@ def patched_bond_paint(self, painter, option, widget):
             if white_factor > 0.05:
                 # Temporary Swap Bond Color in Settings to influence internal drawing
                 win = self.scene().views()[0].window() if self.scene() and self.scene().views() else None
-                if win and hasattr(win, "settings"):
-                    orig_hex = win.settings.get("bond_color_2d", "#222222")
+                if win and hasattr(win.init_manager, "settings"):
+                    orig_hex = win.init_manager.settings.get("bond_color_2d", "#222222")
                     faded_color = blend_with_white(QColor(orig_hex), white_factor)
-                    win.settings["bond_color_2d"] = faded_color.name()
+                    win.init_manager.settings["bond_color_2d"] = faded_color.name()
                     try:
                         _original_bond_paint(self, painter, option, widget)
                     finally:
-                        win.settings["bond_color_2d"] = orig_hex
+                        win.init_manager.settings["bond_color_2d"] = orig_hex
                     return
 
     _original_bond_paint(self, painter, option, widget)
@@ -907,6 +959,7 @@ class LocalCalculationWorker(QObject):
             params = AllChem.ETKDGv2()
             params.randomSeed = 42
             params.enforceChirality = True
+            # Convert once as a whole molecule; fragment separation is handled later in sync analysis.
 
             if self.force_direct_mode:
                 self.status.emit("Force Direct Mode: Skipping RDKit embedding...")
@@ -1012,11 +1065,11 @@ def start_local_embedding(mw, embed_without_h=False, force_direct_mode=False):
     if _active_worker:
         return
 
-    mol_block = mw.data.to_mol_block()
+    mol_block = mw.state_manager.data.to_mol_block()
     if not mol_block:
         return
 
-    atom_ids = list(mw.data.atoms.keys())
+    atom_ids = list(mw.state_manager.data.atoms.keys())
     
     # Setup thread and worker
     thread = QThread()
@@ -1056,7 +1109,7 @@ def start_local_embedding(mw, embed_without_h=False, force_direct_mode=False):
     if hasattr(mw, "plotter") and mw.plotter:
         try:
             mw.plotter.clear()
-            bg_color_hex = mw.settings.get("background_color", "#919191")
+            bg_color_hex = mw.init_manager.settings.get("background_color", "#919191")
             from PyQt6.QtGui import QColor
             bg_qcolor = QColor(bg_color_hex)
             luminance = bg_qcolor.toHsl().lightness() if bg_qcolor.isValid() else 255
@@ -1095,14 +1148,14 @@ def on_embedding_finished(mw, mol):
     mw.current_mol = mol
     
     # CRITICAL APP STATE SYNC: Re-establish atom mapping and chiral labels before drawing.
-    if hasattr(mw, "create_atom_id_mapping"):
-        mw.create_atom_id_mapping()
-    if hasattr(mw, "update_chiral_labels"):
-        mw.update_chiral_labels()
-
+    if hasattr(mw.compute_manager, "create_atom_id_mapping"):
+        mw.compute_manager.create_atom_id_mapping()
+    if hasattr(mw.view_3d_manager, "update_chiral_labels"):
+        mw.view_3d_manager.update_chiral_labels()
+    
     # Update 3D viewer
-    if hasattr(mw, "draw_molecule_3d"):
-        mw.draw_molecule_3d(mol)
+    if hasattr(mw.view_3d_manager, "draw_molecule_3d"):
+        mw.view_3d_manager.draw_molecule_3d(mol)
     
     # Perform Sync
     sync_to_3d_layout(mw, mol)
@@ -1115,19 +1168,19 @@ def on_embedding_finished(mw, mol):
         Chem.AssignStereochemistry(mol, force=True, cleanIt=True)
 
     # CRITICAL APP STATE SYNC: Notify main application that 3D conversion is finished
-    if hasattr(mw, "push_undo_state"):
-        mw.push_undo_state()
-    if hasattr(mw, "_enable_3d_features"):
-        mw._enable_3d_features(True)
+    if hasattr(mw.edit_actions_manager, "push_undo_state"):
+        mw.edit_actions_manager.push_undo_state()
+    if hasattr(mw.ui_manager, "_enable_3d_features"):
+        mw.ui_manager._enable_3d_features(True)
     if hasattr(mw, "plotter") and mw.plotter:
         try:
             mw.plotter.reset_camera()
             mw.plotter.render()
         except: pass
-    if hasattr(mw, "setup_3d_hover"):
-        mw.setup_3d_hover()
+    if hasattr(mw.view_3d_manager, "setup_3d_hover"):
+        mw.view_3d_manager.setup_3d_hover()
     if hasattr(mw, "view_2d"):
-        mw.view_2d.setFocus()
+        mw.init_manager.view_2d.setFocus()
     
     mw.statusBar().showMessage("Smart 3D: Local Embedding and Sync completed.")
     mw.scene.update()
@@ -1147,18 +1200,29 @@ def sync_to_3d_layout(mw, mol):
     if not mol or mol.GetNumConformers() == 0: return
     conf = mol.GetConformer()
     scale = _3d_scale
-    
-    # 1. Map original_id to 3D coordinates
-    proj_coords = {}
-    for i in range(mol.GetNumAtoms()):
-        aid = get_original_id(mol.GetAtomWithIdx(i))
-        if aid is not None:
-            p = conf.GetAtomPosition(i)
-            proj_coords[aid] = (p.x * scale, -p.y * scale, p.z * scale)
 
     # 2. Find molecules in scene
     molecules, all_atoms, all_bonds = find_molecules(mw.scene)
-    
+
+    # Build RDKit fragments as independent coordinate maps: aid -> (x, y, z)
+    rdkit_frags = []
+    try:
+        from rdkit.Chem import rdmolops
+        frag_atom_indices = rdmolops.GetMolFrags(mol, asMols=False, sanitizeFrags=False)
+    except Exception:
+        frag_atom_indices = [tuple(range(mol.GetNumAtoms()))]
+
+    for frag in frag_atom_indices:
+        fmap = {}
+        for idx in frag:
+            aid = get_original_id(mol.GetAtomWithIdx(idx))
+            if aid is None:
+                continue
+            p = conf.GetAtomPosition(idx)
+            fmap[aid] = (p.x * scale, -p.y * scale, p.z * scale)
+        if fmap:
+            rdkit_frags.append(fmap)
+
     # 3. Targeted Sync based on selection
     selected_items = mw.scene.selectedItems()
     target_mol_indices = []
@@ -1173,11 +1237,31 @@ def sync_to_3d_layout(mw, mol):
                     target_mol_indices.append(i)
                     break
     
-    # 4. Sync target molecules
+    # 4. Sync target molecules with best-matching RDKit fragment
+    used_frag_indices = set()
     for i, mol_atoms in enumerate(molecules):
         if selected_items and i not in target_mol_indices:
             continue
-            
+
+        scene_atom_ids = {getattr(a, "atom_id", None) for a in mol_atoms if getattr(a, "atom_id", None) is not None}
+        best_frag_idx = None
+        best_score = -1
+        for frag_idx, fmap in enumerate(rdkit_frags):
+            if frag_idx in used_frag_indices:
+                continue
+            score = len(scene_atom_ids.intersection(fmap.keys()))
+            if score > best_score:
+                best_score = score
+                best_frag_idx = frag_idx
+
+        if best_frag_idx is None and rdkit_frags:
+            best_frag_idx = 0
+        if best_frag_idx is None:
+            continue
+
+        proj_coords = rdkit_frags[best_frag_idx]
+        used_frag_indices.add(best_frag_idx)
+
         mapped_data = [] # List of (atom_item, px, py, pz)
         for a in mol_atoms:
             # ROBUST MAPPING: Use a.atom_id directly
@@ -1220,17 +1304,17 @@ class RotateToolHandler(QObject):
         self.is_dragging = False
         self.rotate_act = None
         self.target_atoms = None
-        self.mw.view_2d.viewport().installEventFilter(self)
+        self.mw.init_manager.view_2d.viewport().installEventFilter(self)
         
     def set_active(self, state):
         self.active = state
         if state:
-            self.mw.set_mode("plugin_rotate_3d")
+            self.mw.ui_manager.set_mode("plugin_rotate_3d")
             self.ensure_z_coords()
         else:
             self.target_atoms = None
             self.mw.scene.mode = "select"
-            if hasattr(self.mw, "activate_select_mode"): self.mw.activate_select_mode()
+            if hasattr(self.mw.ui_manager, "activate_select_mode"): self.mw.ui_manager.activate_select_mode()
         
         # Recalculate ranges for depth cues
         if self.mw.scene:
@@ -1281,7 +1365,7 @@ class RotateToolHandler(QObject):
         if event.type() == QEvent.Type.MouseButtonPress:
             if event.button() == Qt.MouseButton.LeftButton:
                 # Check for item at click position
-                item = self.mw.view_2d.itemAt(event.position().toPoint())
+                item = self.mw.init_manager.view_2d.itemAt(event.position().toPoint())
                 
                 self.is_dragging = True
                 self.last_pos = event.position().toPoint()
