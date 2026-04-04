@@ -21,7 +21,7 @@ from PyQt6.QtGui import QColor, QPen, QIcon, QAction, QActionGroup, QPainter, QB
 
 # Metadata
 PLUGIN_NAME = "3D Molecule on 2D"
-PLUGIN_VERSION = "2.0.0"
+PLUGIN_VERSION = "2.1.0"
 PLUGIN_AUTHOR = "HiroYokoyama"
 PLUGIN_DESCRIPTION = "Integrated 3D depth cues, rotation, and 3D-aware Mol export. Refactored for V3 API."
 
@@ -1168,8 +1168,8 @@ def on_embedding_finished(mw, mol):
         Chem.AssignStereochemistry(mol, force=True, cleanIt=True)
 
     # CRITICAL APP STATE SYNC: Notify main application that 3D conversion is finished
-    if hasattr(mw.edit_actions_manager, "push_undo_state"):
-        mw.edit_actions_manager.push_undo_state()
+    if _context:
+        _context.push_undo_checkpoint()
     if hasattr(mw.ui_manager, "_enable_3d_features"):
         mw.ui_manager._enable_3d_features(True)
     if hasattr(mw, "plotter") and mw.plotter:
