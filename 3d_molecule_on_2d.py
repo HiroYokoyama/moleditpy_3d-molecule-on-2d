@@ -21,7 +21,7 @@ from PyQt6.QtGui import QColor, QPen, QIcon, QAction, QActionGroup, QPainter, QB
 
 # Metadata
 PLUGIN_NAME = "3D Molecule on 2D"
-PLUGIN_VERSION = "2.1.0"
+PLUGIN_VERSION = "2.1.1"
 PLUGIN_AUTHOR = "HiroYokoyama"
 PLUGIN_DESCRIPTION = "Integrated 3D depth cues, rotation, and 3D-aware Mol export. Refactored for V3 API."
 
@@ -1179,7 +1179,7 @@ def on_embedding_finished(mw, mol):
         except: pass
     if hasattr(mw.view_3d_manager, "setup_3d_hover"):
         mw.view_3d_manager.setup_3d_hover()
-    if hasattr(mw, "view_2d"):
+    if hasattr(mw, "init_manager") and hasattr(mw.init_manager, "view_2d"):
         mw.init_manager.view_2d.setFocus()
     
     mw.statusBar().showMessage("Smart 3D: Local Embedding and Sync completed.")
