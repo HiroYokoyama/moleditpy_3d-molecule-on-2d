@@ -12,20 +12,20 @@ try:
     from PyQt6 import sip
 except ImportError:
     import sip
-from PyQt6.QtWidgets import (QMenu, QToolBar, QDialog, QVBoxLayout, QHBoxLayout, 
-                             QLabel, QSlider, QPushButton, QGraphicsScene, 
-                             QGraphicsItem, QCheckBox, QApplication, QFrame, 
-                             QSpacerItem, QSizePolicy)
+from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QSlider, 
+                             QGraphicsItem, QCheckBox, QFrame, QSpacerItem, 
+                             QSizePolicy)
 from PyQt6.QtCore import Qt, QPointF, QEvent, QObject, QTimer, pyqtSignal, QThread
-from PyQt6.QtGui import QColor, QPen, QIcon, QAction, QActionGroup, QPainter, QBrush
+from PyQt6.QtGui import QColor
+import logging
 
 # Metadata
 PLUGIN_NAME = "3D Molecule on 2D"
-PLUGIN_VERSION = "2.1.1"
+PLUGIN_VERSION = "2.2.0"
 PLUGIN_AUTHOR = "HiroYokoyama"
 PLUGIN_DESCRIPTION = "Integrated 3D depth cues, rotation, and 3D-aware Mol export. Refactored for V3 API."
 
-# Global state
+
 _enabled = True
 _show_depth_cues = True
 _rotate_tool_handler = None
@@ -83,7 +83,6 @@ class PluginSettingsDialog(QDialog):
 
     def init_ui(self):
         layout = QVBoxLayout()
-        global _embed_without_h, _force_direct_mode, _depth_cue_strength, _3d_scale, _show_depth_cues
 
         # 1. General
         self.chk_enable = QCheckBox("Enable Plugin")
@@ -171,7 +170,6 @@ def load_settings():
     global _enabled, _depth_cue_strength, _3d_scale, _embed_without_h, _force_direct_mode, _show_depth_cues
     try:
         if os.path.exists(_settings_file):
-            import json
             with open(_settings_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 _enabled = data.get('enabled', True)
@@ -185,7 +183,6 @@ def load_settings():
 
 def save_settings():
     try:
-        import json
         data = {
             'enabled': _enabled,
             'show_depth_cues': _show_depth_cues,
@@ -203,7 +200,7 @@ def on_cleanup_triggered(*args, allow_trigger=True, **kwargs):
     """
     Smart 3D Trigger with Recursion Guard.
     """
-    global _mw, _context, _last_cleanup_trigger_time, _is_syncing, _embed_without_h, _force_direct_mode
+    global _last_cleanup_trigger_time, _is_syncing
     mw = _mw
     context = _context
     if not mw or not mw.scene: return
@@ -292,18 +289,18 @@ def on_cleanup_triggered(*args, allow_trigger=True, **kwargs):
     
     mw.scene.update()
 
-    global _rotate_tool_handler
+
     if _rotate_tool_handler and hasattr(_rotate_tool_handler, "rotate_act") and _rotate_tool_handler.rotate_act:
         _rotate_tool_handler.rotate_act.setChecked(True)
 
 def show_settings_dialog(*args, **kwargs):
-    global _mw, _context
     if _mw:
         open_settings_dialog(_mw, _context)
     # This consolidates toolbar and menu actions to the same unified dialog.
 
 def open_settings_dialog(mw, context):
     global _enabled
+
     dlg = PluginSettingsDialog(mw, _enabled)
     if dlg.exec():
         changed = False
@@ -323,18 +320,16 @@ def open_settings_dialog(mw, context):
             save_settings()
 
 def initialize(context):
-    global _mw, _settings_file, _enabled, _context
+
     mw = context.get_main_window()
-    _mw = mw
-    _context = context
     
     # Path to the settings file within the plugin directory
     plugin_dir = os.path.dirname(os.path.abspath(__file__))
-    _settings_file = os.path.join(plugin_dir, "3d_molecule_on_2d.json")
+    os.path.join(plugin_dir, "3d_molecule_on_2d.json")
     
     load_settings()
     
-    # Register Setting Menu (always — needed to re-enable the plugin)
+    # Register Setting Menu (always  Eneeded to re-enable the plugin)
     context.add_menu_action("Settings/3D Molecule on 2D...",
                             lambda: open_settings_dialog(mw, context))
 
@@ -350,18 +345,18 @@ def initialize(context):
         context.add_toolbar_action(show_settings_dialog, "3D on 2D Settings...", tooltip="Fine-tune visuals")
 
     def startup_fix():
-        global _plugin_menu_action
+
         # Locate and store the Plugin menu action reference, then set initial enabled state
-        _plugin_menu_action = _find_menu_action(mw, _PLUGIN_MENU_ACTION_TEXT)
+        _find_menu_action(mw, _PLUGIN_MENU_ACTION_TEXT)
         if _enabled:
             enable_plugin(mw, context)
 
     QTimer.singleShot(0, startup_fix)
 
 def enable_plugin(mw, context):
-    global _rotate_tool_handler, _plugin_menu_action
+
     if not _rotate_tool_handler:
-        _rotate_tool_handler = RotateToolHandler(mw)
+        RotateToolHandler(mw)
 
     toggle_monkey_patches(True, mw)
     patch_export_logic(True)
@@ -370,7 +365,7 @@ def enable_plugin(mw, context):
     # never registered (plugin was disabled at startup) or were removed.
     pm = getattr(mw, 'plugin_manager', None)
     if pm and hasattr(pm, 'toolbar_actions'):
-        already = any(a.get('text') in _OWN_ACTION_TEXTS for a in pm.toolbar_actions)
+        already = any(a.get('text', None) in _OWN_ACTION_TEXTS for a in pm.toolbar_actions)
         if not already:
             context.add_toolbar_action(on_cleanup_triggered, "Clean Up 3D", tooltip="Sync 2D layout to 3D")
             context.add_toolbar_action(lambda: None, "Rotate 3D", tooltip="Rotate molecule in 3D")
@@ -408,7 +403,7 @@ def _find_menu_action(mw, text):
     return None
 
 def disable_plugin(mw):
-    global _toolbar_actions_objs, _plugin_menu_action
+
     toggle_monkey_patches(False, mw)
     patch_export_logic(False)
     if _rotate_tool_handler:
@@ -419,15 +414,14 @@ def disable_plugin(mw):
     pm = getattr(mw, 'plugin_manager', None)
     if pm and hasattr(pm, 'toolbar_actions'):
         pm.toolbar_actions = [a for a in pm.toolbar_actions
-                              if a.get('text') not in _OWN_ACTION_TEXTS]
+                              if a.get('text', None) not in _OWN_ACTION_TEXTS]
 
-    # Remove from toolbar — search by text so stale object refs don't matter
+    # Remove from toolbar  Esearch by text so stale object refs don't matter
     tb = getattr(getattr(mw, 'init_manager', None), 'plugin_toolbar', None)
     if tb:
         for act in list(tb.actions()):
             if act.text() in _OWN_ACTION_TEXTS:
                 tb.removeAction(act)
-        _toolbar_actions_objs = []
         # Hide toolbar if nothing non-separator remains
         if not any(not a.isSeparator() for a in tb.actions()):
             tb.hide()
@@ -448,7 +442,7 @@ def refresh_plugin_toolbar(mw, context):
     configure_actions()
 
 def configure_actions():
-    global _mw, _toolbar_actions_objs
+
     mw = _mw
     tb = getattr(getattr(mw, 'init_manager', None), 'plugin_toolbar', None)
     if not tb: return
@@ -465,13 +459,14 @@ def configure_actions():
 
     rotate_act = next((a for a in actions if a.text() == "Rotate 3D"), None)
     cleanup_act = next((a for a in actions if a.text() == "Clean Up 3D"), None)
-    settings_act = next((a for a in actions if a.text() == "3D on 2D Settings..."), None)
+    next((a for a in actions if a.text() == "3D on 2D Settings..."), None)
     
     # Set Checkable and connect toggled
     if rotate_act:
         rotate_act.setCheckable(True)
         try: rotate_act.toggled.disconnect()
-        except: pass
+        except Exception as _e:
+            logging.warning("[3d_molecule_on_2d.py:474] silenced: %s", _e)
         rotate_act.toggled.connect(on_rotate_toggled)
         if _rotate_tool_handler:
             _rotate_tool_handler.rotate_act = rotate_act
@@ -489,7 +484,7 @@ def configure_actions():
     tb.show()
 
 def on_rotate_toggled(checked):
-    global _mw, _rotate_tool_handler
+
     mw = _mw
     if checked:
         # Ensure other tools in the group are unchecked
@@ -509,7 +504,7 @@ def on_rotate_toggled(checked):
     
     # --- Undo/Redo Sync ---
     def on_undo_redo_changed():
-        global _mw
+
         mw = _mw
         # Delay slightly to allow the scene to update its items
         def run_restore():
@@ -558,7 +553,7 @@ def on_rotate_toggled(checked):
 # --- Persistence ---
 
 def save_state():
-    global _mw, _depth_cue_strength, _3d_scale
+
     mw = _mw
     if not mw: return {}
     state = {
@@ -569,7 +564,7 @@ def save_state():
     if mw.scene and hasattr(mw.scene, 'data'):
         z_data = {}
         for aid, atom_data in mw.scene.data.atoms.items():
-            item = atom_data.get('item')
+            item = atom_data.get('item', None)
             if item and not sip_isdeleted_safe(item) and hasattr(item, "z_3d"):
                 # Save raw pixels for Z to match X/Y persistence in the core app.
                 # This ensures that rotations and positions are saved 1:1 without scaling artifacts.
@@ -578,13 +573,13 @@ def save_state():
     return state
 
 def load_state(data):
-    global _mw, _depth_cue_strength, _3d_scale, _enabled, _context
+
     mw = _mw
     if not mw or not data: return
 
-    _depth_cue_strength = data.get("depth_cue_strength", 0.8)
-    _3d_scale = data.get("3d_scale", 50.0)
-    _embed_without_h = data.get("embed_without_h", False)
+    data.get("depth_cue_strength", 0.8)
+    data.get("3d_scale", 50.0)
+    data.get("embed_without_h", False)
 
     # If the file has 3D data, we temporarily enable the plugin
     has_3d_data = "z_data" in data and len(data["z_data"]) > 0
@@ -604,7 +599,7 @@ def load_state(data):
                     aid = int(aid_str)
                     atom_data = None
                     if hasattr(mw.scene, 'data') and mw.scene.data:
-                        atom_data = mw.scene.data.atoms.get(aid)
+                        atom_data = mw.scene.data.atoms.get(aid, None)
                     
                     if atom_data and 'item' in atom_data:
                         item = atom_data['item']
@@ -636,10 +631,10 @@ def patched_on_calculation_finished(self, result):
     if hasattr(MainWindowCompute, "_original_on_calculation_finished"):
         MainWindowCompute._original_on_calculation_finished(self, result)
     
-    global _enabled, _mw, _plugin_triggered_conversion
+
     if _enabled and _mw == self and _plugin_triggered_conversion:
         # Reset flag IMMEDIATELY to prevent loop re-entry
-        _plugin_triggered_conversion = False
+        pass
         # Defer slightly for core app UI cleanup
         QTimer.singleShot(700, lambda: on_cleanup_triggered(allow_trigger=False))
 
@@ -654,7 +649,6 @@ def toggle_monkey_patches(active, mw=None):
             _original_atom_paint = AtomItem.paint
             AtomItem.paint = patched_atom_paint
         if _original_bond_paint is None:
-            from moleditpy.ui.bond_item import BondItem
             _original_bond_paint = BondItem.paint
             BondItem.paint = patched_bond_paint
             
@@ -695,7 +689,7 @@ def patched_to_rdkit_mol(self, use_2d_stereo=True):
         for i in range(mol.GetNumAtoms()):
             aid = get_original_id(mol.GetAtomWithIdx(i))
             if aid is not None and aid in self.atoms:
-                item = self.atoms[aid].get("item")
+                item = self.atoms[aid].get("item", None)
                 if item and not sip_isdeleted_safe(item) and hasattr(item, "z_3d"):
                     # Use current visual position (including rotation) for all coordinates
                     pos_item = item.pos()
@@ -745,10 +739,10 @@ def patch_export_logic(active=True):
 # --- Patched Paint Methods ---
 
 def patched_atom_paint(self, painter, option, widget):
-    global _show_depth_cues, _depth_cue_strength, _original_atom_paint
+
     from moleditpy.ui import atom_item
     
-    if _show_depth_cues and hasattr(self, "z_3d") and self.scene():
+    if _show_depth_cues and getattr(self, "z_3d", None) is not None and self.scene():
         # Use per-molecule range if available, else scene range
         z_min = getattr(self, "mol_z_min", None)
         z_max = getattr(self, "mol_z_max", None)
@@ -782,7 +776,7 @@ def patched_atom_paint(self, painter, option, widget):
     _original_atom_paint(self, painter, option, widget)
 
 def patched_bond_paint(self, painter, option, widget):
-    global _show_depth_cues, _depth_cue_strength, _original_bond_paint
+
     if _original_bond_paint is None: return
     
     if _show_depth_cues and hasattr(self.atom1, "z_3d") and hasattr(self.atom2, "z_3d") and self.scene():
@@ -822,7 +816,7 @@ def get_scene_z_range(scene):
     zs = []
     if hasattr(scene, 'data') and hasattr(scene.data, 'atoms'):
         for atom_data in scene.data.atoms.values():
-            item = atom_data.get('item')
+            item = atom_data.get('item', None)
             if item and not sip_isdeleted_safe(item) and hasattr(item, "z_3d"):
                 zs.append(item.z_3d)
     if not zs: return -5.0, 5.0
@@ -880,7 +874,7 @@ def update_molecule_z_ranges(scene):
         # Calculate XY Footprint for proportional depth cue scaling
         xs = [a.pos().x() for a in mol_atoms]
         ys = [a.pos().y() for a in mol_atoms]
-        xy_range = max(max(xs)-min(xs), max(ys)-min(ys), 100.0)
+        max(max(xs)-min(xs), max(ys)-min(ys), 100.0)
         
         actual_depth = z_max - z_min
         # User Feedback: Whiting should match molecule dimension (depth) and be visible.
@@ -1022,7 +1016,7 @@ class LocalCalculationWorker(QObject):
                         conf.SetAtomPosition(idx, Point3D(cp.x, cp.y, cp.z + offset))
                         applied_stereo = True
                 
-                # 2. If no stereo info, apply small random Z-jitter (±0.1 Å)
+                # 2. If no stereo info, apply small random Z-jitter (±0.1 ÁE
                 if not applied_stereo:
                     rng = np.random.default_rng(seed=42)
                     for i in range(mol.GetNumAtoms()):
@@ -1048,7 +1042,8 @@ class LocalCalculationWorker(QObject):
             except:
                 self.status.emit("Optimizing structure (UFF fallback)...")
                 try: AllChem.UFFOptimizeMolecule(mol)
-                except: pass
+                except Exception as _e:
+                    logging.warning("[3d_molecule_on_2d.py:1051] silenced: %s", _e)
 
             # 5. Final Push
             self.status.emit("3D structure ready.")
@@ -1062,6 +1057,7 @@ def start_local_embedding(mw, embed_without_h=False, force_direct_mode=False):
     Start local embedding in a background thread.
     """
     global _active_worker
+
     if _active_worker:
         return
 
@@ -1086,7 +1082,8 @@ def start_local_embedding(mw, embed_without_h=False, force_direct_mode=False):
                 # Update text in the 3D window if it exists
                 mw._calculating_text_actor.SetInput(msg)
                 mw.plotter.render()
-            except: pass
+            except Exception as _e:
+                logging.warning("[3d_molecule_on_2d.py:1089] silenced: %s", _e)
 
     thread.started.connect(worker.run)
     worker.status.connect(update_ui_status)
@@ -1124,7 +1121,8 @@ def start_local_embedding(mw, embed_without_h=False, force_direct_mode=False):
             )
             mw._calculating_text_actor = text_actor
             mw.plotter.render()
-        except: pass
+        except Exception as _e:
+            logging.warning("[3d_molecule_on_2d.py:1127] silenced: %s", _e)
 
     thread.start()
 
@@ -1134,7 +1132,8 @@ def on_embedding_error(mw, msg):
         try:
             mw.plotter.remove_actor(mw._calculating_text_actor)
             mw.plotter.render()
-        except: pass
+        except Exception as _e:
+            logging.warning("[3d_molecule_on_2d.py:1137] silenced: %s", _e)
     mw.statusBar().showMessage(f"Smart 3D Error: {msg}")
 
 def on_embedding_finished(mw, mol):
@@ -1143,7 +1142,8 @@ def on_embedding_finished(mw, mol):
         try:
             mw.plotter.remove_actor(mw._calculating_text_actor)
             mw.plotter.render()
-        except: pass
+        except Exception as _e:
+            logging.warning("[3d_molecule_on_2d.py:1146] silenced: %s", _e)
     
     mw.current_mol = mol
     
@@ -1176,7 +1176,8 @@ def on_embedding_finished(mw, mol):
         try:
             mw.plotter.reset_camera()
             mw.plotter.render()
-        except: pass
+        except Exception as _e:
+            logging.warning("[3d_molecule_on_2d.py:1179] silenced: %s", _e)
     if hasattr(mw.view_3d_manager, "setup_3d_hover"):
         mw.view_3d_manager.setup_3d_hover()
     if hasattr(mw, "init_manager") and hasattr(mw.init_manager, "view_2d"):
@@ -1186,13 +1187,14 @@ def on_embedding_finished(mw, mol):
     mw.scene.update()
 
     # Re-enable and activate Rotate tool
-    global _rotate_tool_handler
+
     if _rotate_tool_handler and hasattr(_rotate_tool_handler, "rotate_act") and _rotate_tool_handler.rotate_act:
         try:
             _rotate_tool_handler.rotate_act.setEnabled(True)
             # Force a small delay to ensure the scene is ready for rotation
             QTimer.singleShot(100, lambda: _rotate_tool_handler.rotate_act.setChecked(True))
-        except: pass
+        except Exception as _e:
+            logging.warning("[3d_molecule_on_2d.py:1195] silenced: %s", _e)
 
 # --- Logic ---
 
