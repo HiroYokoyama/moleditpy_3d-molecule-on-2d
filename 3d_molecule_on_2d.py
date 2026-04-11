@@ -21,7 +21,7 @@ import logging
 
 # Metadata
 PLUGIN_NAME = "3D Molecule on 2D"
-PLUGIN_VERSION = "2.3.0"
+PLUGIN_VERSION = "2.3.1"
 PLUGIN_AUTHOR = "HiroYokoyama"
 PLUGIN_DESCRIPTION = "Integrated 3D depth cues, rotation, and 3D-aware Mol export. Refactored for V3 API."
 
@@ -1411,6 +1411,12 @@ class RotateToolHandler(QObject):
         elif event.type() == QEvent.Type.MouseButtonRelease:
             self.is_dragging = False
             self.target_atoms = None
+            # Refresh cached ring centers after drag so double bonds stay inside rings
+            try:
+                self.mw.state_manager.data.update_ring_info_2d()
+                self.mw.scene.update()
+            except Exception as _e:
+                logging.warning("[3d_molecule_on_2d] ring info refresh failed: %s", _e)
             return True
         return False
 
