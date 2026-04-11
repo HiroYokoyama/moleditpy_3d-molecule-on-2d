@@ -21,7 +21,7 @@ import logging
 
 # Metadata
 PLUGIN_NAME = "3D Molecule on 2D"
-PLUGIN_VERSION = "2.2.0"
+PLUGIN_VERSION = "2.3.0"
 PLUGIN_AUTHOR = "HiroYokoyama"
 PLUGIN_DESCRIPTION = "Integrated 3D depth cues, rotation, and 3D-aware Mol export. Refactored for V3 API."
 
@@ -320,8 +320,11 @@ def open_settings_dialog(mw, context):
             save_settings()
 
 def initialize(context):
+    global _mw, _context
 
     mw = context.get_main_window()
+    _mw = mw
+    _context = context
     
     # Path to the settings file within the plugin directory
     plugin_dir = os.path.dirname(os.path.abspath(__file__))
@@ -354,9 +357,10 @@ def initialize(context):
     QTimer.singleShot(0, startup_fix)
 
 def enable_plugin(mw, context):
+    global _rotate_tool_handler
 
     if not _rotate_tool_handler:
-        RotateToolHandler(mw)
+        _rotate_tool_handler = RotateToolHandler(mw)
 
     toggle_monkey_patches(True, mw)
     patch_export_logic(True)
@@ -442,14 +446,15 @@ def refresh_plugin_toolbar(mw, context):
     configure_actions()
 
 def configure_actions():
+    global _toolbar_actions_objs
 
     mw = _mw
     tb = getattr(getattr(mw, 'init_manager', None), 'plugin_toolbar', None)
     if not tb: return
-    
+
     # Filter for our actions in the toolbar
     found_actions = [a for a in tb.actions() if a.text() in ["Clean Up 3D", "Rotate 3D", "3D on 2D Settings..."]]
-    
+
     # Only update our global list if we found them (to avoid clearing it when plugin is disabled)
     if found_actions:
         _toolbar_actions_objs = found_actions
@@ -641,9 +646,7 @@ def patched_on_calculation_finished(self, result):
 def toggle_monkey_patches(active, mw=None):
     from moleditpy.ui.atom_item import AtomItem
     from moleditpy.ui.bond_item import BondItem
-    global _original_atom_paint, _original_bond_paint, _show_depth_cues
-    
-    _show_depth_cues = active
+    global _original_atom_paint, _original_bond_paint
     if active:
         if _original_atom_paint is None:
             _original_atom_paint = AtomItem.paint
@@ -1080,7 +1083,11 @@ def start_local_embedding(mw, embed_without_h=False, force_direct_mode=False):
         if hasattr(mw, "_calculating_text_actor"):
             try:
                 # Update text in the 3D window if it exists
-                mw._calculating_text_actor.SetInput(msg)
+                actor = mw._calculating_text_actor
+                if hasattr(actor, "SetInput"):
+                    actor.SetInput(msg)
+                elif hasattr(actor, "SetText"):
+                    actor.SetText(1, msg)  # CornerAnnotation: 1 = lower-right
                 mw.plotter.render()
             except Exception as _e:
                 logging.warning("[3d_molecule_on_2d.py:1089] silenced: %s", _e)
