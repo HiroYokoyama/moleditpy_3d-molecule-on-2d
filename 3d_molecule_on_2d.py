@@ -21,7 +21,7 @@ import logging
 
 # Metadata
 PLUGIN_NAME = "3D Molecule on 2D"
-PLUGIN_VERSION = "2.3.1"
+PLUGIN_VERSION = "2.4.0"
 PLUGIN_AUTHOR = "HiroYokoyama"
 PLUGIN_DESCRIPTION = "Integrated 3D depth cues, rotation, and 3D-aware Mol export. Refactored for V3 API."
 
@@ -702,21 +702,36 @@ def patched_to_rdkit_mol(self, use_2d_stereo=True):
                     conf.SetAtomPosition(i, Point3D(ax, ay, az))
     return mol
 
-def patched_save_as_mol(self, *args, **kwargs):
+def patched_to_mol_block(self):
     global _export_in_progress
-    from moleditpy.ui.io_logic import IOManager as MainWindowMolecularParsers
+    old_flag = _export_in_progress
     _export_in_progress = True
     try:
-        if hasattr(MainWindowMolecularParsers, "_original_save_as_mol") and MainWindowMolecularParsers._original_save_as_mol:
-             return MainWindowMolecularParsers._original_save_as_mol(self, *args, **kwargs)
-        return self.save_as_mol(*args, **kwargs) # Fallback (should not happen if patched)
+        mol_block = self._original_to_mol_block()
     finally:
-        _export_in_progress = False
+        _export_in_progress = old_flag
+
+    if mol_block:
+        lines = mol_block.split("\n")
+        # By removing "RDKit" from the header, we trick the main app's save_as_mol
+        # into skipping its buggy "2D" replacement string format.
+        if len(lines) > 1 and "RDKit" in lines[1]:
+            dim_flag = lines[1][20:22] if len(lines[1]) >= 22 else "3D"
+            if dim_flag not in ("2D", "3D"):
+                dim_flag = "3D"
+            try:
+                from moleditpy.utils.constants import VERSION
+            except ImportError:
+                VERSION = "1.0"
+            prefix = f"  MoleditPy Ver. {VERSION}"
+            prefix = prefix[:20].ljust(20)
+            lines[1] = prefix + dim_flag + lines[1][22:]
+            mol_block = "\n".join(lines)
+    return mol_block
 
 def patch_export_logic(active=True):
     """Monkey patch MolecularData and Parsers for 3D-aware Mol export."""
     from moleditpy.core.molecular_data import MolecularData
-    from moleditpy.ui.io_logic import IOManager as MainWindowMolecularParsers
     
     if active:
         # Patch to_rdkit_mol (data layer)
@@ -724,20 +739,20 @@ def patch_export_logic(active=True):
             MolecularData._original_to_rdkit_mol = MolecularData.to_rdkit_mol
             MolecularData.to_rdkit_mol = patched_to_rdkit_mol
             
-        # Patch save_as_mol (UI/Export layer) to trigger the flag
-        if not hasattr(MainWindowMolecularParsers, "_original_save_as_mol"):
-            MainWindowMolecularParsers._original_save_as_mol = MainWindowMolecularParsers.save_as_mol
-            MainWindowMolecularParsers.save_as_mol = patched_save_as_mol
+        # Patch to_mol_block to avoid main app overwriting dimensionality flag
+        if not hasattr(MolecularData, "_original_to_mol_block"):
+            MolecularData._original_to_mol_block = MolecularData.to_mol_block
+            MolecularData.to_mol_block = patched_to_mol_block
     else:
         # Restore to_rdkit_mol
         if hasattr(MolecularData, "_original_to_rdkit_mol"):
             MolecularData.to_rdkit_mol = MolecularData._original_to_rdkit_mol
             delattr(MolecularData, "_original_to_rdkit_mol")
             
-        # Restore save_as_mol
-        if hasattr(MainWindowMolecularParsers, "_original_save_as_mol"):
-            MainWindowMolecularParsers.save_as_mol = MainWindowMolecularParsers._original_save_as_mol
-            delattr(MainWindowMolecularParsers, "_original_save_as_mol")
+        # Restore to_mol_block
+        if hasattr(MolecularData, "_original_to_mol_block"):
+            MolecularData.to_mol_block = MolecularData._original_to_mol_block
+            delattr(MolecularData, "_original_to_mol_block")
 
 # --- Patched Paint Methods ---
 
@@ -1291,9 +1306,13 @@ def sync_to_3d_layout(mw, mol):
         dx, dy = cur_2d_x - proj_x, cur_2d_y - proj_y
         
         for atom_item, px, py, pz in mapped_data:
-            atom_item.setPos(QPointF(px + dx, py + dy))
+            new_pos = QPointF(px + dx, py + dy)
+            atom_item.setPos(new_pos)
             atom_item.z_3d = pz
             atom_item.setZValue(pz)
+            aid = getattr(atom_item, "atom_id", None)
+            if aid is not None and hasattr(mw.state_manager.data, "set_atom_pos"):
+                mw.state_manager.data.set_atom_pos(aid, new_pos)
 
     # 5. Update ALL bonds (ensure position and ZValue) and Z-ranges
     for bond in all_bonds:
@@ -1415,6 +1434,8 @@ class RotateToolHandler(QObject):
             try:
                 self.mw.state_manager.data.update_ring_info_2d()
                 self.mw.scene.update()
+                if hasattr(self.mw, "edit_actions_manager"):
+                    self.mw.edit_actions_manager.push_undo_state()
             except Exception as _e:
                 logging.warning("[3d_molecule_on_2d] ring info refresh failed: %s", _e)
             return True
@@ -1441,9 +1462,13 @@ class RotateToolHandler(QObject):
             new_pts = (points - center) @ R.T + center
             
             for i, atom in enumerate(mol_atoms):
-                atom.setPos(QPointF(new_pts[i, 0], new_pts[i, 1]))
+                new_pos = QPointF(new_pts[i, 0], new_pts[i, 1])
+                atom.setPos(new_pos)
                 atom.z_3d = new_pts[i, 2]
                 atom.setZValue(atom.z_3d)
+                aid = getattr(atom, "atom_id", None)
+                if aid is not None and hasattr(self.mw.state_manager.data, "set_atom_pos"):
+                    self.mw.state_manager.data.set_atom_pos(aid, new_pos)
 
         # 6. Update all bond positions
         for bond in all_bonds:
