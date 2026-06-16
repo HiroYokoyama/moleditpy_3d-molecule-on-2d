@@ -1,6 +1,56 @@
 import sys
 import os
 import importlib
+import types
+from unittest.mock import MagicMock
+
+# Stub PyQt6.QtGui to bypass ModuleNotFoundError when importing moleditpy
+qt_gui = types.ModuleType("PyQt6.QtGui")
+
+class MockQColor:
+    def __init__(self, *args, **kwargs): pass
+    def redF(self): return 1.0
+    def greenF(self): return 1.0
+    def blueF(self): return 1.0
+
+class MockWeight:
+    Bold = 75
+    Normal = 50
+
+class MockQFont:
+    Weight = MockWeight
+    def __init__(self, *args, **kwargs): pass
+
+qt_gui.QColor = MockQColor
+qt_gui.QFont = MockQFont
+
+pyqt6 = types.ModuleType("PyQt6")
+pyqt6.QtGui = qt_gui
+sip_mock = MagicMock()
+sip_mock.isdeleted.return_value = False
+pyqt6.sip = sip_mock
+sys.modules["sip"] = sip_mock
+
+qt_widgets = types.ModuleType("PyQt6.QtWidgets")
+for name in [
+    "QDialog", "QVBoxLayout", "QHBoxLayout", "QLabel", "QSlider",
+    "QGraphicsItem", "QCheckBox", "QFrame", "QSpacerItem", "QSizePolicy"
+]:
+    setattr(qt_widgets, name, MagicMock)
+pyqt6.QtWidgets = qt_widgets
+
+qt_core = types.ModuleType("PyQt6.QtCore")
+for name in [
+    "Qt", "QPointF", "QEvent", "QObject", "QTimer", "pyqtSignal", "QThread"
+]:
+    setattr(qt_core, name, MagicMock)
+pyqt6.QtCore = qt_core
+
+sys.modules["PyQt6"] = pyqt6
+sys.modules["PyQt6.QtGui"] = qt_gui
+sys.modules["PyQt6.sip"] = pyqt6.sip
+sys.modules["PyQt6.QtWidgets"] = qt_widgets
+sys.modules["PyQt6.QtCore"] = qt_core
 
 # Add core moleditpy source to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../python_molecular_editor/moleditpy/src')))
