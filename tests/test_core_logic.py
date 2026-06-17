@@ -4,6 +4,7 @@ import unittest
 import importlib.util
 from unittest.mock import MagicMock
 import numpy as np
+import types
 
 # Set up paths to import the plugin and host app
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../python_molecular_editor/moleditpy/src')))
@@ -21,6 +22,51 @@ def _restore_real_pyqt6():
 
 _restore_real_pyqt6()
 
+# Check if real PyQt6 is available
+HAS_REAL_PYQT6 = False
+if "PyQt6" in sys.modules:
+    pyqt6_mod = sys.modules["PyQt6"]
+    if hasattr(pyqt6_mod, "__file__"):
+        HAS_REAL_PYQT6 = True
+else:
+    try:
+        import PyQt6
+        HAS_REAL_PYQT6 = True
+    except ImportError:
+        HAS_REAL_PYQT6 = False
+
+if not HAS_REAL_PYQT6:
+    # Set up stubs so that importing the plugin doesn't fail on CI
+    if "sip" not in sys.modules:
+        sip_stub = types.ModuleType("sip")
+        sip_stub.isdeleted = lambda obj: False
+        sys.modules["sip"] = sip_stub
+    
+    if "PyQt6" not in sys.modules:
+        pyqt6 = types.ModuleType("PyQt6")
+        
+        qt_core = types.ModuleType("PyQt6.QtCore")
+        for name in ["Qt", "QPointF", "QEvent", "QObject", "QTimer", "pyqtSignal", "QThread"]:
+            setattr(qt_core, name, MagicMock)
+        
+        qt_widgets = types.ModuleType("PyQt6.QtWidgets")
+        for name in ["QDialog", "QVBoxLayout", "QHBoxLayout", "QLabel", "QSlider",
+                     "QGraphicsItem", "QCheckBox", "QFrame", "QSpacerItem", "QSizePolicy"]:
+            setattr(qt_widgets, name, MagicMock)
+            
+        qt_gui = types.ModuleType("PyQt6.QtGui")
+        qt_gui.QColor = MagicMock
+        
+        pyqt6.QtCore = qt_core
+        pyqt6.QtWidgets = qt_widgets
+        pyqt6.QtGui = qt_gui
+        
+        sys.modules["PyQt6"] = pyqt6
+        sys.modules["PyQt6.QtCore"] = qt_core
+        sys.modules["PyQt6.QtWidgets"] = qt_widgets
+        sys.modules["PyQt6.QtGui"] = qt_gui
+        sys.modules["PyQt6.sip"] = sip_stub
+
 # Import the plugin dynamically since its filename starts with a number
 _PLUGIN_PATH = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "3d_molecule_on_2d.py")
@@ -30,16 +76,18 @@ _pkg = importlib.util.module_from_spec(_spec)
 sys.modules["_3d_molecule_on_2d"] = _pkg
 _spec.loader.exec_module(_pkg)
 
+@unittest.skipUnless(HAS_REAL_PYQT6, "Requires real PyQt6 installed")
 class TestCoreLogic(unittest.TestCase):
     def setUp(self):
-        # Restore real PyQt6 modules if they were stubbed by other tests
-        _restore_real_pyqt6()
-        # Re-import/reload the plugin to make sure it refers to real PyQt6 classes
-        global _pkg
-        _spec = importlib.util.spec_from_file_location("_3d_molecule_on_2d", _PLUGIN_PATH)
-        _pkg = importlib.util.module_from_spec(_spec)
-        sys.modules["_3d_molecule_on_2d"] = _pkg
-        _spec.loader.exec_module(_pkg)
+        if HAS_REAL_PYQT6:
+            # Restore real PyQt6 modules if they were stubbed by other tests
+            _restore_real_pyqt6()
+            # Re-import/reload the plugin to make sure it refers to real PyQt6 classes
+            global _pkg
+            _spec = importlib.util.spec_from_file_location("_3d_molecule_on_2d", _PLUGIN_PATH)
+            _pkg = importlib.util.module_from_spec(_spec)
+            sys.modules["_3d_molecule_on_2d"] = _pkg
+            _spec.loader.exec_module(_pkg)
 
     def test_blend_with_white(self):
         from PyQt6.QtGui import QColor
