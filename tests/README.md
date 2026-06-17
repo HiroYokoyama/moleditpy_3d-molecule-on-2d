@@ -1,29 +1,42 @@
-# 3D Molecule on 2D Plugin Tests
+# 3D Molecule on 2D - Test Suite Guide
 
-This directory contains standalone and integration tests specific to the `moleditpy_3d-molecule-on-2d` plugin.
+This directory contains the unit and integration tests for the `moleditpy_3d-molecule-on-2d` plugin.
 
-## Available Tests
+## Test Structure
 
-### `test_plugin_integration.py`
-Verifies the plugin's compatibility contract against the host application's `PluginContext` API.
+- **`test_core_logic.py`**: Validates the core calculations and workers of the plugin, including:
+  - Color blending math used for visual depth cueing.
+  - `LocalCalculationWorker` 3D structures generation (via RDKit embedding, hydrogen operations, and coordinate jitter fallbacks).
+  - Rigid body coordinates rotation math via `RotateToolHandler`.
+- **`test_plugin_integration.py`**: Checks that the plugin correctly integrates with the host application's `PluginContext` (verifying action namespacing, setting persistence, and save/load state handlers).
+- **`test_export.py`**: Ensures that the monkey-patched molecular MOL block generation correctly formats 3D coordinate grids with proper dimensionality.
 
-It operates in two modes:
-1. **Stub Mode**: Always runs (local and CI) without requiring GUI, Qt, or RDKit libraries. Stubs check registrations, handlers, namespacing, and metadata format.
-2. **Real-Context Mode**: Runs when the main app (`python_molecular_editor`) is detected or provided via the `CI_MAIN_APP_SRC` environment variable. It validates that the actual `PluginContext` API is fully matched.
+---
 
-### `test_export.py`
-Verifies that the `3d_molecule_on_2d` plugin correctly exports 3D molecular data to a `.mol` file format, explicitly bypassing bugs in the core `io_logic.py` export routine without actually modifying the main application.
+## Running Tests
 
-Specifically, it tests:
-1. **Header Dimensionality Formatting**: Checks that the `'3D'` dimensionality flag is perfectly aligned to columns 21-22 in the MOL V2000 specification.
-2. **Data Model Injection**: Checks that `z_3d` values extracted from UI representations (`item.pos()` and `item.z_3d`) are correctly scaled and mapped into the RDKit conformer.
-3. **Non-Zero Coordinate Persistence**: Validates that the final generated MOL block does not incorrectly wipe Z-coordinates to `0.0000`.
+To run the test suite, navigate to the plugin root directory and execute `pytest`. 
 
-## How to Run
+### Important: Environment Configuration under Windows
+Because `pytest-qt` loads PySide6 by default, it can conflict with PyQt6 imports in the plugin, resulting in `DLL load failed` or symbol collisions. To prevent this, **always** specify the `PYTEST_QT_API=pyqt6` environment variable:
 
-To execute all tests (including integration tests), run:
+#### PowerShell
+```powershell
+$env:MOLEDITPY_HEADLESS="1"
+$env:QT_QPA_PLATFORM="offscreen"
+$env:PYTEST_QT_API="pyqt6"
+pytest -v
+```
 
+#### CMD
 ```cmd
-cd e:\Research\Calculation\moleditpy\DEV_MAIN\moleditpy_3d-molecule-on-2d
-python -m pytest tests/ -v
+set MOLEDITPY_HEADLESS=1
+set QT_QPA_PLATFORM=offscreen
+set PYTEST_QT_API=pyqt6
+pytest -v
+```
+
+#### Bash
+```bash
+MOLEDITPY_HEADLESS=1 QT_QPA_PLATFORM=offscreen PYTEST_QT_API=pyqt6 pytest -v
 ```
