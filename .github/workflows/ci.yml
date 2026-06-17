@@ -27,13 +27,17 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install pytest rdkit
+        pip install pytest rdkit PyQt6
 
     - name: Clone main MoleditPy application
       run: |
         git clone --depth 1           https://github.com/HiroYokoyama/python_molecular_editor.git           python_molecular_editor
 
     - name: Run test suite
+      env:
+        MOLEDITPY_HEADLESS: "1"
+        QT_QPA_PLATFORM: "offscreen"
+        PYTEST_QT_API: "pyqt6"
       run: |
         cd moleditpy_3d-molecule-on-2d
         python -m pytest tests/ -v
