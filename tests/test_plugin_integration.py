@@ -29,13 +29,13 @@ def _install_stubs():
     if "PyQt6" not in sys.modules or not hasattr(sys.modules.get("PyQt6"), "__file__"):
         pyqt6 = types.ModuleType("PyQt6")
 
-        # sip  Eimported at top level by 3d_molecule_on_2d
+        # sip - imported at top level by 3d_molecule_on_2d
         sip_stub = types.ModuleType("sip")
         sip_stub.isdeleted = lambda obj: False
-        sys.modules.setdefault("sip", sip_stub)
+        sys.modules["sip"] = sip_stub
         # Also handle "from PyQt6 import sip" branch
         pyqt6.sip = sip_stub
-        sys.modules.setdefault("PyQt6.sip", sip_stub)
+        sys.modules["PyQt6.sip"] = sip_stub
 
         qt_core = types.ModuleType("PyQt6.QtCore")
         qt_core.Qt = MagicMock()
@@ -46,7 +46,7 @@ def _install_stubs():
         class _QTimer:
             @staticmethod
             def singleShot(ms, fn):
-                pass  # do not call fn  Eavoids cascading Qt dependency
+                pass  # do not call fn - avoids cascading Qt dependency
 
         qt_core.QTimer = _QTimer
         qt_core.pyqtSignal = MagicMock()
@@ -62,10 +62,15 @@ def _install_stubs():
         qt_gui = types.ModuleType("PyQt6.QtGui")
         qt_gui.QColor = MagicMock()
 
-        sys.modules.setdefault("PyQt6", pyqt6)
-        sys.modules.setdefault("PyQt6.QtCore", qt_core)
-        sys.modules.setdefault("PyQt6.QtWidgets", qt_widgets)
-        sys.modules.setdefault("PyQt6.QtGui", qt_gui)
+        pyqt6.QtCore = qt_core
+        pyqt6.QtWidgets = qt_widgets
+        pyqt6.QtGui = qt_gui
+
+        sys.modules["PyQt6"] = pyqt6
+        sys.modules["PyQt6.QtCore"] = qt_core
+        sys.modules["PyQt6.QtWidgets"] = qt_widgets
+        sys.modules["PyQt6.QtGui"] = qt_gui
+
 
     # RDKit
     rdkit_stub = types.ModuleType("rdkit")
