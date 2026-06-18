@@ -1,0 +1,5 @@
+{
+  "mw": {
+    "tool_group": "Guarded by hasattr, used for backward compatibility with older host versions"
+  }
+}
