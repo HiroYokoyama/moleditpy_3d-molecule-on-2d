@@ -1,5 +1,11 @@
 {
   "mw": {
     "tool_group": "Guarded by hasattr, used for backward compatibility with older host versions"
+  },
+  "manager": {
+    "init_manager": {
+      "add_plugin_toolbar_actions": "Guarded by hasattr, used for plugin toolbar refresh"
+    }
   }
 }
+
