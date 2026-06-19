@@ -562,7 +562,7 @@ def configure_actions():
         try:
             rotate_act.toggled.disconnect()
         except Exception as _e:
-            logging.warning("[3d_molecule_on_2d.py:474] silenced: %s", _e)
+            logging.debug("[3d_molecule_on_2d.py:474] silenced: %s", _e)
         rotate_act.toggled.connect(on_rotate_toggled)
         if _rotate_tool_handler:
             _rotate_tool_handler.rotate_act = rotate_act
