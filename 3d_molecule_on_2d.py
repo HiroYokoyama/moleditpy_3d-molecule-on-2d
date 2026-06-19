@@ -686,7 +686,11 @@ def save_state():
     if mw.scene and hasattr(mw.scene, "data"):
         z_data = {}
         for aid, atom_data in mw.scene.data.atoms.items():
-            item = atom_data.get("item", None)
+            item = None
+            if hasattr(mw.scene, "atom_items") and mw.scene.atom_items:
+                item = mw.scene.atom_items.get(aid, None)
+            else:
+                item = atom_data.get("item", None)
             if item and not sip_isdeleted_safe(item) and hasattr(item, "z_3d"):
                 # Save raw pixels for Z to match X/Y persistence in the core app.
                 # This ensures that rotations and positions are saved 1:1 without scaling artifacts.
@@ -726,11 +730,15 @@ def load_state(data):
                     if hasattr(mw.scene, "data") and mw.scene.data:
                         atom_data = mw.scene.data.atoms.get(aid, None)
 
-                    if atom_data and "item" in atom_data:
+                    item = None
+                    if hasattr(mw.scene, "atom_items") and mw.scene.atom_items:
+                        item = mw.scene.atom_items.get(aid, None)
+                    elif atom_data and "item" in atom_data:
                         item = atom_data["item"]
-                        if item and not sip_isdeleted_safe(item):
-                            item.z_3d = z
-                            item.setZValue(z)
+
+                    if item and not sip_isdeleted_safe(item):
+                        item.z_3d = z
+                        item.setZValue(z)
                 except Exception:
                     continue
 
@@ -829,7 +837,16 @@ def patched_to_rdkit_mol(self, use_2d_stereo=True):
         for i in range(mol.GetNumAtoms()):
             aid = get_original_id(mol.GetAtomWithIdx(i))
             if aid is not None and aid in self.atoms:
-                item = self.atoms[aid].get("item", None)
+                item = None
+                if (
+                    _mw
+                    and _mw.scene
+                    and hasattr(_mw.scene, "atom_items")
+                    and _mw.scene.atom_items
+                ):
+                    item = _mw.scene.atom_items.get(aid, None)
+                else:
+                    item = self.atoms[aid].get("item", None)
                 if item and not sip_isdeleted_safe(item) and hasattr(item, "z_3d"):
                     # Use current visual position (including rotation) for all coordinates
                     pos_item = item.pos()
@@ -988,8 +1005,12 @@ def patched_bond_paint(self, painter, option, widget):
 def get_scene_z_range(scene):
     zs = []
     if hasattr(scene, "data") and hasattr(scene.data, "atoms"):
-        for atom_data in scene.data.atoms.values():
-            item = atom_data.get("item", None)
+        for aid, atom_data in scene.data.atoms.items():
+            item = None
+            if hasattr(scene, "atom_items") and scene.atom_items:
+                item = scene.atom_items.get(aid, None)
+            else:
+                item = atom_data.get("item", None)
             if item and not sip_isdeleted_safe(item) and hasattr(item, "z_3d"):
                 zs.append(item.z_3d)
     if not zs:
