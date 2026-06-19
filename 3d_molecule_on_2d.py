@@ -34,6 +34,7 @@ PLUGIN_NAME = "3D Molecule on 2D"
 PLUGIN_VERSION = "3.0.0"
 PLUGIN_AUTHOR = "HiroYokoyama"
 PLUGIN_DESCRIPTION = "Integrated 3D depth cues, rotation, and 3D-aware Mol export. Refactored for V3 API."
+PLUGIN_SUPPORTED_MOLEDITPY_VERSION = ">=3.0.0, <5.0.0"
 
 
 _enabled = True
