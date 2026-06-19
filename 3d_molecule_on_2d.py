@@ -523,10 +523,8 @@ def refresh_plugin_toolbar(mw, context):
         return
 
     # Rebuild the toolbar from the plugin_manager's registered list
-    if hasattr(mw, "init_manager") and hasattr(
-        mw.init_manager, "add_plugin_toolbar_actions"
-    ):
-        mw.init_manager.add_plugin_toolbar_actions()
+    if hasattr(mw, "plugin_menu_manager"):
+        mw.plugin_menu_manager.add_plugin_toolbar_actions()
 
     tb.show()
     configure_actions()
