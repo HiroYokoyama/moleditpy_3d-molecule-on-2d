@@ -7,18 +7,32 @@ import numpy as np
 import types
 
 # Set up paths to import the plugin and host app
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../python_molecular_editor/moleditpy/src')))
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.insert(
+    0,
+    os.path.abspath(
+        os.path.join(
+            os.path.dirname(__file__), "../../python_molecular_editor/moleditpy/src"
+        )
+    ),
+)
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 
 def _restore_real_pyqt6():
     import sys
+
     to_remove = []
     for k, v in list(sys.modules.items()):
         if k.startswith("PyQt6") or k == "sip" or k == "_3d_molecule_on_2d":
-            if not hasattr(v, "__file__") or "mock" in str(type(v)).lower() or k == "_3d_molecule_on_2d":
+            if (
+                not hasattr(v, "__file__")
+                or "mock" in str(type(v)).lower()
+                or k == "_3d_molecule_on_2d"
+            ):
                 to_remove.append(k)
     for k in to_remove:
         del sys.modules[k]
+
 
 _restore_real_pyqt6()
 
@@ -31,6 +45,7 @@ if "PyQt6" in sys.modules:
 else:
     try:
         import PyQt6
+
         HAS_REAL_PYQT6 = True
     except ImportError:
         HAS_REAL_PYQT6 = False
@@ -41,26 +56,44 @@ if not HAS_REAL_PYQT6:
         sip_stub = types.ModuleType("sip")
         sip_stub.isdeleted = lambda obj: False
         sys.modules["sip"] = sip_stub
-    
+
     if "PyQt6" not in sys.modules:
         pyqt6 = types.ModuleType("PyQt6")
-        
+
         qt_core = types.ModuleType("PyQt6.QtCore")
-        for name in ["Qt", "QPointF", "QEvent", "QObject", "QTimer", "pyqtSignal", "QThread"]:
+        for name in [
+            "Qt",
+            "QPointF",
+            "QEvent",
+            "QObject",
+            "QTimer",
+            "pyqtSignal",
+            "QThread",
+        ]:
             setattr(qt_core, name, MagicMock)
-        
+
         qt_widgets = types.ModuleType("PyQt6.QtWidgets")
-        for name in ["QDialog", "QVBoxLayout", "QHBoxLayout", "QLabel", "QSlider",
-                     "QGraphicsItem", "QCheckBox", "QFrame", "QSpacerItem", "QSizePolicy"]:
+        for name in [
+            "QDialog",
+            "QVBoxLayout",
+            "QHBoxLayout",
+            "QLabel",
+            "QSlider",
+            "QGraphicsItem",
+            "QCheckBox",
+            "QFrame",
+            "QSpacerItem",
+            "QSizePolicy",
+        ]:
             setattr(qt_widgets, name, MagicMock)
-            
+
         qt_gui = types.ModuleType("PyQt6.QtGui")
         qt_gui.QColor = MagicMock
-        
+
         pyqt6.QtCore = qt_core
         pyqt6.QtWidgets = qt_widgets
         pyqt6.QtGui = qt_gui
-        
+
         sys.modules["PyQt6"] = pyqt6
         sys.modules["PyQt6.QtCore"] = qt_core
         sys.modules["PyQt6.QtWidgets"] = qt_widgets
@@ -76,6 +109,7 @@ _pkg = importlib.util.module_from_spec(_spec)
 sys.modules["_3d_molecule_on_2d"] = _pkg
 _spec.loader.exec_module(_pkg)
 
+
 @unittest.skipUnless(HAS_REAL_PYQT6, "Requires real PyQt6 installed")
 class TestCoreLogic(unittest.TestCase):
     def setUp(self):
@@ -84,14 +118,16 @@ class TestCoreLogic(unittest.TestCase):
             _restore_real_pyqt6()
             # Re-import/reload the plugin to make sure it refers to real PyQt6 classes
             global _pkg
-            _spec = importlib.util.spec_from_file_location("_3d_molecule_on_2d", _PLUGIN_PATH)
+            _spec = importlib.util.spec_from_file_location(
+                "_3d_molecule_on_2d", _PLUGIN_PATH
+            )
             _pkg = importlib.util.module_from_spec(_spec)
             sys.modules["_3d_molecule_on_2d"] = _pkg
             _spec.loader.exec_module(_pkg)
 
     def test_blend_with_white(self):
         from PyQt6.QtGui import QColor
-        
+
         # Test factor 0.0 (returns original color)
         c1 = QColor(100, 150, 200)
         res1 = _pkg.blend_with_white(c1, 0.0)
@@ -126,10 +162,7 @@ class TestCoreLogic(unittest.TestCase):
 
         # 1. Test standard embedding (embed_without_h=False)
         worker = _pkg.LocalCalculationWorker(
-            mol_block,
-            embed_without_h=False,
-            force_direct_mode=False,
-            atom_ids=atom_ids
+            mol_block, embed_without_h=False, force_direct_mode=False, atom_ids=atom_ids
         )
 
         status_messages = []
@@ -146,37 +179,33 @@ class TestCoreLogic(unittest.TestCase):
         self.assertEqual(len(finished_mols), 1)
         out_mol = finished_mols[0]
         self.assertGreater(out_mol.GetNumAtoms(), 2)  # Should contain added hydrogens
-        
+
         # Verify mapping of original IDs to the embedded molecule
         self.assertEqual(out_mol.GetAtomWithIdx(0).GetIntProp("_original_atom_id"), 101)
         self.assertEqual(out_mol.GetAtomWithIdx(1).GetIntProp("_original_atom_id"), 102)
 
         # 2. Test embedding without hydrogens (embed_without_h=True)
         worker_no_h = _pkg.LocalCalculationWorker(
-            mol_block,
-            embed_without_h=True,
-            force_direct_mode=False,
-            atom_ids=atom_ids
+            mol_block, embed_without_h=True, force_direct_mode=False, atom_ids=atom_ids
         )
         finished_mols_no_h = []
         worker_no_h.finished.connect(finished_mols_no_h.append)
         worker_no_h.run()
-        
+
         out_mol_no_h = finished_mols_no_h[0]
         self.assertEqual(out_mol_no_h.GetNumAtoms(), 2)  # Hydrogens stripped/removed
-        self.assertEqual(out_mol_no_h.GetAtomWithIdx(0).GetIntProp("_original_atom_id"), 101)
+        self.assertEqual(
+            out_mol_no_h.GetAtomWithIdx(0).GetIntProp("_original_atom_id"), 101
+        )
 
         # 3. Test force_direct_mode fallback
         worker_direct = _pkg.LocalCalculationWorker(
-            mol_block,
-            embed_without_h=True,
-            force_direct_mode=True,
-            atom_ids=atom_ids
+            mol_block, embed_without_h=True, force_direct_mode=True, atom_ids=atom_ids
         )
         finished_mols_direct = []
         worker_direct.finished.connect(finished_mols_direct.append)
         worker_direct.run()
-        
+
         out_mol_direct = finished_mols_direct[0]
         self.assertEqual(out_mol_direct.GetNumAtoms(), 2)
 
@@ -193,12 +222,16 @@ class TestCoreLogic(unittest.TestCase):
                 self.z_3d = z
                 self.atom_id = atom_id
                 self._z_value = z
+
             def pos(self):
                 return self._pos
+
             def setPos(self, pos):
                 self._pos = pos
+
             def setZValue(self, z):
                 self._z_value = z
+
             def scene(self):
                 return mock_scene
 
@@ -207,8 +240,10 @@ class TestCoreLogic(unittest.TestCase):
             def __init__(self):
                 self.data = MagicMock()
                 self._items = []
+
             def items(self):
                 return self._items
+
             def update(self):
                 pass
 
@@ -248,6 +283,7 @@ class TestCoreLogic(unittest.TestCase):
 
         # Verify that Z coordinates rotated (are no longer both exactly 10.0)
         self.assertNotAlmostEqual(atom1.z_3d, 10.0, places=5)
+
 
 if __name__ == "__main__":
     unittest.main()

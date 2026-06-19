@@ -15,6 +15,7 @@ The ci.yml already clones the main app:
       run: git clone --depth 1 https://github.com/HiroYokoyama/python_molecular_editor.git
              python_molecular_editor
 """
+
 import sys
 import os
 import types
@@ -24,6 +25,7 @@ from unittest.mock import MagicMock
 # ---------------------------------------------------------------------------
 # Stub Qt and heavy deps before importing the plugin
 # ---------------------------------------------------------------------------
+
 
 def _install_stubs():
     if "PyQt6" not in sys.modules or not hasattr(sys.modules.get("PyQt6"), "__file__"):
@@ -54,8 +56,16 @@ def _install_stubs():
 
         qt_widgets = types.ModuleType("PyQt6.QtWidgets")
         for cls_name in [
-            "QDialog", "QVBoxLayout", "QHBoxLayout", "QLabel", "QSlider",
-            "QGraphicsItem", "QCheckBox", "QFrame", "QSpacerItem", "QSizePolicy",
+            "QDialog",
+            "QVBoxLayout",
+            "QHBoxLayout",
+            "QLabel",
+            "QSlider",
+            "QGraphicsItem",
+            "QCheckBox",
+            "QFrame",
+            "QSpacerItem",
+            "QSizePolicy",
         ]:
             setattr(qt_widgets, cls_name, MagicMock())
 
@@ -70,7 +80,6 @@ def _install_stubs():
         sys.modules["PyQt6.QtCore"] = qt_core
         sys.modules["PyQt6.QtWidgets"] = qt_widgets
         sys.modules["PyQt6.QtGui"] = qt_gui
-
 
     # RDKit
     rdkit_stub = types.ModuleType("rdkit")
@@ -92,6 +101,7 @@ _install_stubs()
 sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(__file__), "..")))
 
 import importlib.util
+
 _PLUGIN_PATH = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "3d_molecule_on_2d.py")
 )
@@ -108,6 +118,7 @@ PLUGIN_VERSION = _pkg.PLUGIN_VERSION
 # ---------------------------------------------------------------------------
 # Stub PluginContext
 # ---------------------------------------------------------------------------
+
 
 class _StubContext:
     def __init__(self):
@@ -135,19 +146,35 @@ class _StubContext:
         mw.scene = None
         return mw
 
-    def show_status_message(self, msg, duration=0): pass
-    def register_document_reset_handler(self, fn): pass
-    def register_file_opener(self, ext, fn, priority=0): pass
-    def register_drop_handler(self, fn, priority=0): pass
-    def add_export_action(self, label, fn): pass
-    def add_analysis_tool(self, label, fn): pass
-    def register_window(self, key, win): pass
-    def get_window(self, key): return None
+    def show_status_message(self, msg, duration=0):
+        pass
+
+    def register_document_reset_handler(self, fn):
+        pass
+
+    def register_file_opener(self, ext, fn, priority=0):
+        pass
+
+    def register_drop_handler(self, fn, priority=0):
+        pass
+
+    def add_export_action(self, label, fn):
+        pass
+
+    def add_analysis_tool(self, label, fn):
+        pass
+
+    def register_window(self, key, win):
+        pass
+
+    def get_window(self, key):
+        return None
 
 
 # ---------------------------------------------------------------------------
 # Tests: metadata
 # ---------------------------------------------------------------------------
+
 
 class TestMetadata(unittest.TestCase):
     def test_plugin_name(self):
@@ -163,6 +190,7 @@ class TestMetadata(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # Tests: initialize contract
 # ---------------------------------------------------------------------------
+
 
 class TestInitialize(unittest.TestCase):
     def setUp(self):
@@ -203,6 +231,7 @@ class TestInitialize(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # Tests: save_state / load_state handlers
 # ---------------------------------------------------------------------------
+
 
 class TestSaveLoadHandlers(unittest.TestCase):
     def setUp(self):
@@ -255,13 +284,25 @@ class TestSaveLoadHandlers(unittest.TestCase):
 _MAIN_APP_CANDIDATES = [
     # Local dev: DEV_MAIN/python_molecular_editor/moleditpy/src
     os.path.normpath(
-        os.path.join(os.path.dirname(__file__), "..", "..",
-                     "python_molecular_editor", "moleditpy", "src")
+        os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "..",
+            "python_molecular_editor",
+            "moleditpy",
+            "src",
+        )
     ),
     # CI: checked out as ./python_molecular_editor next to the plugin dir
     os.path.normpath(
-        os.path.join(os.path.dirname(__file__), "..", "..",
-                     "python_molecular_editor", "moleditpy", "src")
+        os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "..",
+            "python_molecular_editor",
+            "moleditpy",
+            "src",
+        )
     ),
     os.environ.get("CI_MAIN_APP_SRC", ""),
 ]
@@ -273,20 +314,22 @@ HAS_MAIN_APP = _MAIN_APP_SRC is not None
 
 try:
     import pytest
+
     _skipif = pytest.mark.skipif(
         not HAS_MAIN_APP,
         reason="main app not found; set CI_MAIN_APP_SRC or ensure python_molecular_editor is cloned",
     )
 except ImportError:
+
     def _skipif(cls):
         return unittest.skip("pytest not available")(cls)
-
 
 
 def _clear_qt_stubs():
     """Remove fake PyQt6 stub modules so real PyQt6 can be imported by moleditpy."""
     to_remove = [
-        k for k in list(sys.modules)
+        k
+        for k in list(sys.modules)
         if k.startswith("PyQt6") and not hasattr(sys.modules[k], "__file__")
     ]
     for k in to_remove:
@@ -294,6 +337,7 @@ def _clear_qt_stubs():
     # Clear any moleditpy import that may have been attempted with stubs
     for k in [k for k in list(sys.modules) if k.startswith("moleditpy")]:
         del sys.modules[k]
+
 
 @_skipif
 class TestWithRealPluginContext(unittest.TestCase):
@@ -306,8 +350,13 @@ class TestWithRealPluginContext(unittest.TestCase):
         # Load plugin_interface.py directly to avoid triggering moleditpy/__init__.py
         # which imports PyQt6 and conflicts with PySide6 loaded by pytest-qt on Windows.
         import importlib.util as _ilu
-        _pi_path = os.path.join(_MAIN_APP_SRC, 'moleditpy', 'plugins', 'plugin_interface.py')
-        _spec = _ilu.spec_from_file_location('moleditpy.plugins.plugin_interface', _pi_path)
+
+        _pi_path = os.path.join(
+            _MAIN_APP_SRC, "moleditpy", "plugins", "plugin_interface.py"
+        )
+        _spec = _ilu.spec_from_file_location(
+            "moleditpy.plugins.plugin_interface", _pi_path
+        )
         _mod = _ilu.module_from_spec(_spec)
         _spec.loader.exec_module(_mod)
         cls.PluginContext = _mod.PluginContext
@@ -331,8 +380,10 @@ class TestWithRealPluginContext(unittest.TestCase):
 
     def test_stub_interface_matches_real(self):
         for method in [
-            "add_menu_action", "register_save_handler",
-            "register_load_handler", "get_main_window",
+            "add_menu_action",
+            "register_save_handler",
+            "register_load_handler",
+            "get_main_window",
         ]:
             self.assertTrue(
                 hasattr(self.PluginContext, method),
