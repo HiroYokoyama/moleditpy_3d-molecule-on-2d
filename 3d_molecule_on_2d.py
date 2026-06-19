@@ -337,7 +337,10 @@ def on_cleanup_triggered(*args, allow_trigger=True, **kwargs):
     finally:
         _is_syncing = False
 
-    mw.scene.update()
+    if hasattr(mw.scene, "update_all_items"):
+        mw.scene.update_all_items()
+    else:
+        mw.scene.update()
 
     if (
         _rotate_tool_handler
@@ -745,7 +748,10 @@ def load_state(data):
                 bond.setZValue((bond.atom1.z_3d + bond.atom2.z_3d) / 2.0)
 
         update_molecule_z_ranges(mw.scene)
-        mw.scene.update()
+        if hasattr(mw.scene, "update_all_items"):
+            mw.scene.update_all_items()
+        else:
+            mw.scene.update()
 
     QTimer.singleShot(200, finalized_restore)
 
@@ -1384,7 +1390,10 @@ def on_embedding_finished(mw, mol):
         mw.init_manager.view_2d.setFocus()
 
     mw.statusBar().showMessage("Smart 3D: Local Embedding and Sync completed.")
-    mw.scene.update()
+    if hasattr(mw.scene, "update_all_items"):
+        mw.scene.update_all_items()
+    else:
+        mw.scene.update()
 
     # Re-enable and activate Rotate tool
 
@@ -1517,7 +1526,10 @@ def sync_to_3d_layout(mw, mol):
             bond.setZValue((bond.atom1.z_3d + bond.atom2.z_3d) / 2.0)
 
     update_molecule_z_ranges(mw.scene)
-    mw.scene.update()
+    if hasattr(mw.scene, "update_all_items"):
+        mw.scene.update_all_items()
+    else:
+        mw.scene.update()
 
 
 class RotateToolHandler(QObject):
