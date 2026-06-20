@@ -33,11 +33,6 @@ jobs:
             exit 1
           fi
 
-      - name: Build release package
-        run: |
-          TAG="${{ github.event.inputs.version }}"
-          zip "3d_molecule_on_2d_${TAG}.zip" 3d_molecule_on_2d.py
-
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -46,7 +41,7 @@ jobs:
           gh release create "$TAG" \
             --title "3D Molecule on 2D $TAG" \
             --generate-notes \
-            "3d_molecule_on_2d_$TAG.zip"
+            3d_molecule_on_2d.py
 
       - name: Trigger moleditpy-plugins registry update
         if: success()
