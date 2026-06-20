@@ -31,10 +31,10 @@ import logging
 
 # Metadata
 PLUGIN_NAME = "3D Molecule on 2D"
-PLUGIN_VERSION = "3.0.0"
+PLUGIN_VERSION = "4.0.0"
 PLUGIN_AUTHOR = "HiroYokoyama"
 PLUGIN_DESCRIPTION = "Integrated 3D depth cues, rotation, and 3D-aware Mol export. Refactored for V3 API."
-PLUGIN_SUPPORTED_MOLEDITPY_VERSION = ">=3.0.0, <5.0.0"
+PLUGIN_SUPPORTED_MOLEDITPY_VERSION = ">=4.0.0, <5.0.0"
 
 
 _enabled = True
@@ -298,7 +298,7 @@ def on_cleanup_triggered(*args, allow_trigger=True, **kwargs):
             # Loop protection: No more than one trigger per 5 seconds
             now = time.time()
             if now - _last_cleanup_trigger_time < 5.0:
-                mw.statusBar().showMessage(
+                context.show_status_message(
                     "Smart 3D: Cooldown active. Skipping re-trigger."
                 )
                 return
@@ -337,8 +337,8 @@ def on_cleanup_triggered(*args, allow_trigger=True, **kwargs):
     finally:
         _is_syncing = False
 
-    if hasattr(mw.scene, "update_all_items"):
-        mw.scene.update_all_items()
+    if context:
+        context.refresh_2d_scene()
     else:
         mw.scene.update()
 
@@ -754,8 +754,8 @@ def load_state(data):
                 bond.setZValue((bond.atom1.z_3d + bond.atom2.z_3d) / 2.0)
 
         update_molecule_z_ranges(mw.scene)
-        if hasattr(mw.scene, "update_all_items"):
-            mw.scene.update_all_items()
+        if _context:
+            _context.refresh_2d_scene()
         else:
             mw.scene.update()
 
@@ -1293,7 +1293,8 @@ def start_local_embedding(mw, embed_without_h=False, force_direct_mode=False):
 
     # Connect signals
     def update_ui_status(msg):
-        mw.statusBar().showMessage(msg)
+        if _context:
+            _context.show_status_message(msg)
         if hasattr(mw, "_calculating_text_actor"):
             try:
                 # Update text in the 3D window if it exists
@@ -1358,7 +1359,8 @@ def on_embedding_error(mw, msg):
             mw.plotter.render()
         except Exception as _e:
             logging.warning("[3d_molecule_on_2d.py:1137] silenced: %s", _e)
-    mw.statusBar().showMessage(f"Smart 3D Error: {msg}")
+    if _context:
+        _context.show_status_message(f"Smart 3D Error: {msg}")
 
 
 def on_embedding_finished(mw, mol):
@@ -1379,8 +1381,8 @@ def on_embedding_finished(mw, mol):
         mw.view_3d_manager.update_chiral_labels()
 
     # Update 3D viewer
-    if hasattr(mw.view_3d_manager, "draw_molecule_3d"):
-        mw.view_3d_manager.draw_molecule_3d(mol)
+    if _context:
+        _context.draw_molecule_3d(mol)
 
     # Perform Sync
     sync_to_3d_layout(mw, mol)
@@ -1395,22 +1397,17 @@ def on_embedding_finished(mw, mol):
     # CRITICAL APP STATE SYNC: Notify main application that 3D conversion is finished
     if _context:
         _context.push_undo_checkpoint()
-    if hasattr(mw.ui_manager, "_enable_3d_features"):
-        mw.ui_manager._enable_3d_features(True)
-    if hasattr(mw, "plotter") and mw.plotter:
-        try:
-            mw.plotter.reset_camera()
-            mw.plotter.render()
-        except Exception as _e:
-            logging.warning("[3d_molecule_on_2d.py:1179] silenced: %s", _e)
+    if _context:
+        _context.set_3d_features_enabled(True)
+        _context.reset_3d_camera()
     if hasattr(mw.view_3d_manager, "setup_3d_hover"):
         mw.view_3d_manager.setup_3d_hover()
     if hasattr(mw, "init_manager") and hasattr(mw.init_manager, "view_2d"):
         mw.init_manager.view_2d.setFocus()
 
-    mw.statusBar().showMessage("Smart 3D: Local Embedding and Sync completed.")
-    if hasattr(mw.scene, "update_all_items"):
-        mw.scene.update_all_items()
+    if _context:
+        _context.show_status_message("Smart 3D: Local Embedding and Sync completed.")
+        _context.refresh_2d_scene()
     else:
         mw.scene.update()
 
@@ -1545,8 +1542,8 @@ def sync_to_3d_layout(mw, mol):
             bond.setZValue((bond.atom1.z_3d + bond.atom2.z_3d) / 2.0)
 
     update_molecule_z_ranges(mw.scene)
-    if hasattr(mw.scene, "update_all_items"):
-        mw.scene.update_all_items()
+    if _context:
+        _context.refresh_2d_scene()
     else:
         mw.scene.update()
 
@@ -1666,7 +1663,8 @@ class RotateToolHandler(QObject):
             self.is_dragging = False
             self.target_atoms = None
             # Refresh cached ring centers after drag so double bonds stay inside rings
-            self.mw.scene.update_all_items()
+            if _context:
+                _context.refresh_2d_scene()
             self.mw.edit_actions_manager.push_undo_state()
             return True
         return False
