@@ -1,4 +1,4 @@
-﻿# 3D Molecule on 2D Plugin for MoleditPy
+# 3D Molecule on 2D Plugin for MoleditPy
 
 [![CI](https://github.com/HiroYokoyama/moleditpy_3d-molecule-on-2d/actions/workflows/ci.yml/badge.svg)](https://github.com/HiroYokoyama/moleditpy_3d-molecule-on-2d/actions/workflows/ci.yml)
 [![Downloads](https://img.shields.io/github/downloads/HiroYokoyama/moleditpy_3d-molecule-on-2d/total)](https://github.com/HiroYokoyama/moleditpy_3d-molecule-on-2d/releases)
