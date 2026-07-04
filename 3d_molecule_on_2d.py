@@ -1,3 +1,13 @@
+"""
+3D Molecule on 2D Plugin for MoleditPy.
+Integrated 3D depth cues, rotation, and 3D-aware Mol export.
+
+Source code, README, and full license (GNU GPL):
+    https://github.com/HiroYokoyama/moleditpy_3d-molecule-on-2d
+Copyright (c) HiroYokoyama. Licensed under the GNU General Public License;
+see the LICENSE file in the repository above for the full terms.
+"""
+
 import os
 import time
 import json
@@ -31,7 +41,7 @@ import logging
 
 # Metadata
 PLUGIN_NAME = "3D Molecule on 2D"
-PLUGIN_VERSION = "3.0.1"
+PLUGIN_VERSION = "3.0.2"
 PLUGIN_AUTHOR = "HiroYokoyama"
 PLUGIN_DESCRIPTION = "Integrated 3D depth cues, rotation, and 3D-aware Mol export. Refactored for V3 API."
 PLUGIN_SUPPORTED_MOLEDITPY_VERSION = ">=4.0.0, <5.0.0"
