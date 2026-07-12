@@ -440,6 +440,7 @@ def enable_plugin(mw, context):
 
     toggle_monkey_patches(True, mw)
     patch_export_logic(True)
+    patch_state_logic(True)
 
     # Re-register toolbar actions with the plugin_manager if they were
     # never registered (plugin was disabled at startup) or were removed.
@@ -500,6 +501,7 @@ def _find_menu_action(mw, text):
 def disable_plugin(mw):
     toggle_monkey_patches(False, mw)
     patch_export_logic(False)
+    patch_state_logic(False)
     if _rotate_tool_handler:
         _rotate_tool_handler.set_active(False)
 
@@ -619,7 +621,11 @@ def on_rotate_toggled(checked):
         # Delay slightly to allow the scene to update its items
         def run_restore():
             if _rotate_tool_handler:
-                _rotate_tool_handler.ensure_z_coords(force=True)
+                # force=False: if set_state_from_data already restored the
+                # snapshot's z_3d (non-zero depth present), keep it instead of
+                # recomputing from the RDKit conformer, which would throw away
+                # the rotation the undo was meant to restore.
+                _rotate_tool_handler.ensure_z_coords(force=False)
             if mw.scene:
                 _, _, all_bonds = find_molecules(mw.scene)
                 for bond in all_bonds:
@@ -917,6 +923,93 @@ def patch_export_logic(active=True):
         if hasattr(MolecularData, "_original_to_mol_block"):
             MolecularData.to_mol_block = MolecularData._original_to_mol_block
             delattr(MolecularData, "_original_to_mol_block")
+
+
+# --- Undo/Redo state persistence (3D depth) ---
+#
+# The core undo snapshot (StateManager.get_current_state) only records the 2D
+# X/Y of each atom. The 3D-on-2D depth lives in per-item ``z_3d`` attributes,
+# so a plain undo recreated atoms flat and the old restore path recomputed Z
+# from the RDKit conformer (the *original* embedding) — discarding whatever
+# orientation the user had rotated to. We hook get_current_state /
+# set_state_from_data to round-trip z_3d with every snapshot so undo/redo
+# restores the exact depth.
+
+
+def patched_get_current_state(self):
+    state = self._original_get_current_state()
+    z_data = {}
+    scene = getattr(self.host, "scene", None)
+    if scene is not None and getattr(scene, "atom_items", None):
+        for aid, item in scene.atom_items.items():
+            if item is None or sip_isdeleted_safe(item):
+                continue
+            if hasattr(item, "z_3d"):
+                z_data[str(aid)] = float(item.z_3d)
+    if z_data:
+        state["mol3d_on_2d_z"] = z_data
+    return state
+
+
+def patched_set_state_from_data(self, state_data):
+    self._original_set_state_from_data(state_data)
+
+    scene = getattr(self.host, "scene", None)
+    if scene is None or not getattr(scene, "atom_items", None):
+        return
+
+    z_data = (
+        state_data.get("mol3d_on_2d_z", {}) if isinstance(state_data, dict) else {}
+    )
+    for aid_str, z in z_data.items():
+        try:
+            aid = int(aid_str)
+        except (ValueError, TypeError):
+            continue
+        item = scene.atom_items.get(aid, None)
+        if (
+            item is not None
+            and not sip_isdeleted_safe(item)
+            and hasattr(item, "z_3d")
+        ):
+            item.z_3d = float(z)
+            item.setZValue(float(z))
+
+    # Re-derive bond depth ordering / molecule z-ranges from the restored Z.
+    try:
+        _, _, all_bonds = find_molecules(scene)
+        for bond in all_bonds:
+            if hasattr(bond, "update_position"):
+                bond.update_position()
+            if hasattr(bond.atom1, "z_3d") and hasattr(bond.atom2, "z_3d"):
+                bond.setZValue((bond.atom1.z_3d + bond.atom2.z_3d) / 2.0)
+        update_molecule_z_ranges(scene)
+    except Exception as _e:
+        logging.warning("[3d_molecule_on_2d] z-restore refresh silenced: %s", _e)
+
+
+def patch_state_logic(active=True):
+    """Round-trip per-atom 3D depth (z_3d) through the undo/redo snapshots."""
+    from moleditpy.ui.app_state import StateManager
+
+    if active:
+        if not hasattr(StateManager, "_original_get_current_state"):
+            StateManager._original_get_current_state = StateManager.get_current_state
+            StateManager.get_current_state = patched_get_current_state
+        if not hasattr(StateManager, "_original_set_state_from_data"):
+            StateManager._original_set_state_from_data = (
+                StateManager.set_state_from_data
+            )
+            StateManager.set_state_from_data = patched_set_state_from_data
+    else:
+        if hasattr(StateManager, "_original_get_current_state"):
+            StateManager.get_current_state = StateManager._original_get_current_state
+            delattr(StateManager, "_original_get_current_state")
+        if hasattr(StateManager, "_original_set_state_from_data"):
+            StateManager.set_state_from_data = (
+                StateManager._original_set_state_from_data
+            )
+            delattr(StateManager, "_original_set_state_from_data")
 
 
 # --- Patched Paint Methods ---
