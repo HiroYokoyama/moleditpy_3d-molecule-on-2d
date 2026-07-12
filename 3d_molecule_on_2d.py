@@ -41,7 +41,7 @@ import logging
 
 # Metadata
 PLUGIN_NAME = "3D Molecule on 2D"
-PLUGIN_VERSION = "3.1.0"
+PLUGIN_VERSION = "3.1.1"
 PLUGIN_AUTHOR = "HiroYokoyama"
 PLUGIN_DESCRIPTION = "Integrated 3D depth cues, rotation, and 3D-aware Mol export. Refactored for V3 API."
 PLUGIN_SUPPORTED_MOLEDITPY_VERSION = ">=4.0.0, <5.0.0"
@@ -967,11 +967,12 @@ def patched_set_state_from_data(self, state_data):
         except (ValueError, TypeError):
             continue
         item = scene.atom_items.get(aid, None)
-        if (
-            item is not None
-            and not sip_isdeleted_safe(item)
-            and hasattr(item, "z_3d")
-        ):
+        # NOTE: no hasattr(item, "z_3d") guard. set_state_from_data recreates
+        # the atom items fresh (restore_atoms_and_bonds), so they do NOT yet
+        # carry the plugin's dynamically-added z_3d attribute. Guarding on it
+        # skipped every atom and left the molecule flat after undo. z_data keys
+        # are exactly the atoms that had depth, so assign it unconditionally.
+        if item is not None and not sip_isdeleted_safe(item):
             item.z_3d = float(z)
             item.setZValue(float(z))
 
