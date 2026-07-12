@@ -41,7 +41,7 @@ import logging
 
 # Metadata
 PLUGIN_NAME = "3D Molecule on 2D"
-PLUGIN_VERSION = "3.1.1"
+PLUGIN_VERSION = "3.1.2"
 PLUGIN_AUTHOR = "HiroYokoyama"
 PLUGIN_DESCRIPTION = "Integrated 3D depth cues, rotation, and 3D-aware Mol export. Refactored for V3 API."
 PLUGIN_SUPPORTED_MOLEDITPY_VERSION = ">=4.0.0, <5.0.0"
@@ -340,6 +340,10 @@ def on_cleanup_triggered(*args, allow_trigger=True, **kwargs):
             else:
                 context.show_status_message("Smart 3D: Syncing layout to 3D...")
             sync_to_3d_layout(mw, mol)
+            # sync_to_3d_layout moves atoms and rewrites z_3d but pushed no undo
+            # checkpoint, so the layout change could not be undone. Record it.
+            if context:
+                context.push_undo_checkpoint()
         else:
             context.show_status_message(
                 "Smart 3D: Conversion needed for synchronization."
@@ -579,6 +583,17 @@ def configure_actions():
         rotate_act.toggled.connect(on_rotate_toggled)
         if _rotate_tool_handler:
             _rotate_tool_handler.rotate_act = rotate_act
+
+    # Clean Up 3D must be (re)connected here too. The toolbar is rebuilt on
+    # every refresh_plugin_toolbar, which leaves the action without a live
+    # trigger connection — so clicking it did nothing. Rebind it to the handler
+    # (disconnect first to avoid double-firing).
+    if cleanup_act:
+        try:
+            cleanup_act.triggered.disconnect()
+        except (TypeError, RuntimeError) as _e:
+            logging.debug("[3d_molecule_on_2d] cleanup disconnect: %s", _e)
+        cleanup_act.triggered.connect(on_cleanup_triggered)
 
     # Mode Integration: Add Rotate 3D to main tool group for exclusivity
     if rotate_act and hasattr(mw, "tool_group"):
