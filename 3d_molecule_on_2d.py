@@ -41,7 +41,7 @@ import logging
 
 # Metadata
 PLUGIN_NAME = "3D Molecule on 2D"
-PLUGIN_VERSION = "3.1.2"
+PLUGIN_VERSION = "3.1.3"
 PLUGIN_AUTHOR = "HiroYokoyama"
 PLUGIN_DESCRIPTION = "Integrated 3D depth cues, rotation, and 3D-aware Mol export. Refactored for V3 API."
 PLUGIN_SUPPORTED_MOLEDITPY_VERSION = ">=4.0.0, <5.0.0"
@@ -991,7 +991,11 @@ def patched_set_state_from_data(self, state_data):
             item.z_3d = float(z)
             item.setZValue(float(z))
 
-    # Re-derive bond depth ordering / molecule z-ranges from the restored Z.
+    # Re-derive bond depth ordering / molecule z-ranges from the restored Z,
+    # then force a repaint. The depth-cue bond/atom shading reads z_3d and the
+    # per-molecule z-range at paint time; after an undo recreated the items,
+    # painting against stale/missing depth data left bonds faded gray. Repaint
+    # so the shading uses the freshly restored values.
     try:
         _, _, all_bonds = find_molecules(scene)
         for bond in all_bonds:
@@ -1000,8 +1004,27 @@ def patched_set_state_from_data(self, state_data):
             if hasattr(bond.atom1, "z_3d") and hasattr(bond.atom2, "z_3d"):
                 bond.setZValue((bond.atom1.z_3d + bond.atom2.z_3d) / 2.0)
         update_molecule_z_ranges(scene)
+        scene.update()
+        for view in scene.views():
+            view.viewport().update()
     except Exception as _e:
         logging.warning("[3d_molecule_on_2d] z-restore refresh silenced: %s", _e)
+
+    # Schedule one more recompute + repaint after the undo (and any other
+    # set_state_from_data patch, e.g. the reaction sketcher's, which rebuilds
+    # its items afterwards) has fully settled, so the final frame is correct.
+    def _deferred_depth_refresh():
+        try:
+            if sip_isdeleted_safe(scene):
+                return
+            update_molecule_z_ranges(scene)
+            scene.update()
+            for view in scene.views():
+                view.viewport().update()
+        except (RuntimeError, AttributeError) as _e:
+            logging.debug("[3d_molecule_on_2d] deferred depth refresh: %s", _e)
+
+    QTimer.singleShot(0, _deferred_depth_refresh)
 
 
 def patch_state_logic(active=True):
