@@ -41,7 +41,7 @@ import logging
 
 # Metadata
 PLUGIN_NAME = "3D Molecule on 2D"
-PLUGIN_VERSION = "3.1.3"
+PLUGIN_VERSION = "3.1.4"
 PLUGIN_AUTHOR = "HiroYokoyama"
 PLUGIN_DESCRIPTION = "Integrated 3D depth cues, rotation, and 3D-aware Mol export. Refactored for V3 API."
 PLUGIN_SUPPORTED_MOLEDITPY_VERSION = ">=4.0.0, <5.0.0"
@@ -50,6 +50,7 @@ PLUGIN_SUPPORTED_MOLEDITPY_VERSION = ">=4.0.0, <5.0.0"
 _enabled = True
 _show_depth_cues = True
 _rotate_tool_handler = None
+_undo_hook_installed = False
 _depth_cue_strength = 0.8  # 0.0 to 1.0
 _3d_scale = 50.0  # Strictly matches 1.0 / ANGSTROM_PER_PIXEL (1.0 / 0.02 = 50)
 _embed_without_h = True  # New option: Default to True per user request
@@ -445,6 +446,7 @@ def enable_plugin(mw, context):
     toggle_monkey_patches(True, mw)
     patch_export_logic(True)
     patch_state_logic(True)
+    _install_undo_redo_hook(mw)
 
     # Re-register toolbar actions with the plugin_manager if they were
     # never registered (plugin was disabled at startup) or were removed.
@@ -608,6 +610,79 @@ def configure_actions():
     tb.show()
 
 
+def _restore_depth_after_undo():
+    """Recompute z_3d/z-ranges from the RDKit conformer and repaint after an
+    undo/redo. This is the robust fallback: even if the per-snapshot z data is
+    unavailable (e.g. another plugin's state patch shadowed ours), the depth is
+    rebuilt from the 3D molecule so an undo never leaves the layout flat/gray.
+    No-op unless the plugin is currently enabled."""
+    if not _enabled:
+        return
+    mw = _mw
+    if not mw or not mw.scene:
+        return
+    if _rotate_tool_handler:
+        # force=False keeps a snapshot-restored z_3d when present; only
+        # recomputes from RDKit when the atoms came back flat.
+        _rotate_tool_handler.ensure_z_coords(force=False)
+    try:
+        _, _, all_bonds = find_molecules(mw.scene)
+        for bond in all_bonds:
+            if hasattr(bond, "update_position"):
+                bond.update_position()
+            if hasattr(bond.atom1, "z_3d") and hasattr(bond.atom2, "z_3d"):
+                bond.setZValue((bond.atom1.z_3d + bond.atom2.z_3d) / 2.0)
+        update_molecule_z_ranges(mw.scene)
+        mw.scene.update()
+        for view in mw.scene.views():
+            view.viewport().update()
+    except (RuntimeError, AttributeError) as _e:
+        logging.debug("[3d_molecule_on_2d] depth restore after undo: %s", _e)
+
+
+def _install_undo_redo_hook(mw):
+    """Hook undo/redo so 3D depth is restored after every undo, not only while
+    the Rotate tool is toggled. Idempotent; installed from enable_plugin so it
+    is only active while the plugin is enabled."""
+    global _undo_hook_installed
+    if _undo_hook_installed or not mw:
+        return
+
+    def on_undo_redo_changed(*_a, **_k):
+        QTimer.singleShot(100, _restore_depth_after_undo)
+
+    try:
+        stack = getattr(
+            mw.edit_actions_manager,
+            "undo_stack",
+            getattr(mw.edit_actions_manager, "undoStack", None),
+        )
+        if hasattr(stack, "indexChanged"):
+            stack.indexChanged.connect(on_undo_redo_changed)
+        else:
+            for meth_name in ("undo", "redo"):
+                orig = getattr(mw.edit_actions_manager, meth_name, None)
+                if orig and callable(orig) and not hasattr(orig, "_is_patched"):
+
+                    def make_wrapper(orig_fn):
+                        def wrapper(*args, **kwargs):
+                            res = orig_fn(*args, **kwargs)
+                            on_undo_redo_changed()
+                            return res
+
+                        wrapper._is_patched = True
+                        return wrapper
+
+                    setattr(mw.edit_actions_manager, meth_name, make_wrapper(orig))
+        _undo_hook_installed = True
+    except (RuntimeError, AttributeError, TypeError) as e:
+        if _context:
+            _context.show_status_message(
+                f"[{PLUGIN_NAME}] Warning: Could not hook into undo/redo system."
+            )
+        logging.warning("[3d_molecule_on_2d] undo/redo hook failed: %s", e)
+
+
 def on_rotate_toggled(checked):
     mw = _mw
     if checked:
@@ -629,75 +704,8 @@ def on_rotate_toggled(checked):
             mw.init_manager.mode_actions["select"].setChecked(True)
             mw.ui_manager.set_mode("select")
 
-    # --- Undo/Redo Sync ---
-    def on_undo_redo_changed():
-        mw = _mw
-
-        # Delay slightly to allow the scene to update its items
-        def run_restore():
-            if _rotate_tool_handler:
-                # force=False: if set_state_from_data already restored the
-                # snapshot's z_3d (non-zero depth present), keep it instead of
-                # recomputing from the RDKit conformer, which would throw away
-                # the rotation the undo was meant to restore.
-                _rotate_tool_handler.ensure_z_coords(force=False)
-            if mw.scene:
-                _, _, all_bonds = find_molecules(mw.scene)
-                for bond in all_bonds:
-                    if hasattr(bond, "update_position"):
-                        bond.update_position()
-                    if hasattr(bond.atom1, "z_3d") and hasattr(bond.atom2, "z_3d"):
-                        bond.setZValue((bond.atom1.z_3d + bond.atom2.z_3d) / 2.0)
-                update_molecule_z_ranges(mw.scene)
-                mw.scene.update()
-
-        QTimer.singleShot(100, run_restore)
-
-    try:
-        # Check if undo_stack is a list or a QUndoStack
-        stack = getattr(
-            mw.edit_actions_manager,
-            "undo_stack",
-            getattr(mw.edit_actions_manager, "undoStack", None),
-        )
-        if hasattr(stack, "indexChanged"):
-            stack.indexChanged.connect(lambda idx: on_undo_redo_changed())
-        else:
-            # Fallback to monkeypatching if it's a list or doesn't have indexChanged
-            orig_undo = getattr(mw.edit_actions_manager, "undo", None)
-            if (
-                orig_undo
-                and callable(orig_undo)
-                and not hasattr(orig_undo, "_is_patched")
-            ):
-
-                def patched_undo(*args, **kwargs):
-                    res = orig_undo(*args, **kwargs)
-                    on_undo_redo_changed()
-                    return res
-
-                patched_undo._is_patched = True
-                mw.edit_actions_manager.undo = patched_undo
-
-            orig_redo = getattr(mw.edit_actions_manager, "redo", None)
-            if (
-                orig_redo
-                and callable(orig_redo)
-                and not hasattr(orig_redo, "_is_patched")
-            ):
-
-                def patched_redo(*args, **kwargs):
-                    res = orig_redo(*args, **kwargs)
-                    on_undo_redo_changed()
-                    return res
-
-                patched_redo._is_patched = True
-                mw.edit_actions_manager.redo = patched_redo
-    except Exception as e:
-        _context.show_status_message(
-            f"[{PLUGIN_NAME}] Warning: Could not hook into undo/redo system."
-        )
-        print(f"[{PLUGIN_NAME}] Warning: Could not hook into undo/redo system: {e}")
+    # Ensure the undo/redo depth restore is hooked (idempotent).
+    _install_undo_redo_hook(mw)
 
 
 # --- Persistence ---

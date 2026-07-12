@@ -285,5 +285,115 @@ class TestCoreLogic(unittest.TestCase):
         self.assertNotAlmostEqual(atom1.z_3d, 10.0, places=5)
 
 
+class _FakeAtom:
+    """Atom graphics-item stand-in. `has_z` False mimics a freshly recreated
+    item that does not yet carry the plugin's dynamic z_3d attribute."""
+
+    def __init__(self, z=None):
+        self._zval = 0.0
+        if z is not None:
+            self.z_3d = z
+
+    def setZValue(self, z):
+        self._zval = z
+
+
+class _FakeScene:
+    def __init__(self, atom_items):
+        self.atom_items = atom_items
+
+    def items(self):
+        return []
+
+    def views(self):
+        return []
+
+
+class _FakeHost:
+    def __init__(self, scene):
+        self.scene = scene
+
+
+class _FakeStateManager:
+    """Chained-original stand-in: records what the wrapped set/get did."""
+
+    def __init__(self, host, base_state=None):
+        self.host = host
+        self._base = base_state or {"atoms": {}, "bonds": {}}
+        self.restored_with = None
+
+    def _original_get_current_state(self):
+        return dict(self._base)
+
+    def _original_set_state_from_data(self, data):
+        self.restored_with = data
+
+
+class TestUndoZRestore(unittest.TestCase):
+    """Regression tests for 3D depth (z_3d) surviving undo/redo, including the
+    two-plugin case where set_state_from_data recreates atoms fresh."""
+
+    def test_get_current_state_captures_z(self):
+        atoms = {1: _FakeAtom(3.5), 2: _FakeAtom(-1.25)}
+        sm = _FakeStateManager(_FakeHost(_FakeScene(atoms)))
+        state = _pkg.patched_get_current_state(sm)
+        self.assertIn("mol3d_on_2d_z", state)
+        self.assertEqual(state["mol3d_on_2d_z"], {"1": 3.5, "2": -1.25})
+
+    def test_get_current_state_omits_key_when_no_depth(self):
+        atoms = {1: _FakeAtom()}  # no z_3d attribute
+        sm = _FakeStateManager(_FakeHost(_FakeScene(atoms)))
+        state = _pkg.patched_get_current_state(sm)
+        self.assertNotIn("mol3d_on_2d_z", state)
+
+    def test_set_state_restores_z_onto_fresh_atoms(self):
+        # Fresh atoms have NO z_3d attribute (as after restore_atoms_and_bonds).
+        # The restore must add it, not skip them (the "undo made it flat" bug).
+        fresh = {1: _FakeAtom(), 2: _FakeAtom()}
+        sm = _FakeStateManager(_FakeHost(_FakeScene(fresh)))
+        _pkg.patched_set_state_from_data(sm, {"mol3d_on_2d_z": {"1": 4.2, "2": -3.1}})
+        self.assertEqual(getattr(fresh[1], "z_3d", None), 4.2)
+        self.assertEqual(getattr(fresh[2], "z_3d", None), -3.1)
+        self.assertEqual(fresh[1]._zval, 4.2)
+
+    def test_round_trip_capture_then_restore(self):
+        # Capture depth, flatten (fresh atoms), restore from snapshot.
+        src = {1: _FakeAtom(2.0), 2: _FakeAtom(-2.0)}
+        snap = _pkg.patched_get_current_state(
+            _FakeStateManager(_FakeHost(_FakeScene(src)))
+        )
+        fresh = {1: _FakeAtom(), 2: _FakeAtom()}
+        _pkg.patched_set_state_from_data(
+            _FakeStateManager(_FakeHost(_FakeScene(fresh))), snap
+        )
+        self.assertEqual(getattr(fresh[1], "z_3d", None), 2.0)
+        self.assertEqual(getattr(fresh[2], "z_3d", None), -2.0)
+
+    def test_two_plugin_chain_preserves_z(self):
+        # Simulate the reaction-sketcher wrapping our patched functions: it adds
+        # its own keys on capture and reloads its own items on restore, but must
+        # not drop our z data.
+        def rs_get(inner):
+            state = inner()
+            state["rs_items"] = ["arrow"]
+            return state
+
+        def rs_set(inner, data):
+            inner(data)  # chained original (ours) runs first
+
+        src = {1: _FakeAtom(5.0)}
+        our_state = _pkg.patched_get_current_state(
+            _FakeStateManager(_FakeHost(_FakeScene(src)))
+        )
+        wrapped = rs_get(lambda: our_state)
+        self.assertIn("mol3d_on_2d_z", wrapped)
+        self.assertIn("rs_items", wrapped)
+
+        fresh = {1: _FakeAtom()}
+        sm = _FakeStateManager(_FakeHost(_FakeScene(fresh)))
+        rs_set(lambda d: _pkg.patched_set_state_from_data(sm, d), wrapped)
+        self.assertEqual(getattr(fresh[1], "z_3d", None), 5.0)
+
+
 if __name__ == "__main__":
     unittest.main()
