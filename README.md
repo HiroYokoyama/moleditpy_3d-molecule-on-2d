@@ -9,6 +9,7 @@ This plugin enhances MoleditPy with integrated 3D depth cues, interactive 3D rot
 ![Plugin Preview](img/main.png)
 ![Plugin Preview 2](img/main2.png)
 ![With Reaction Sketcher](img/reaction_sketcher.png)
+[![GitHub tag](https://img.shields.io/github/v/tag/HiroYokoyama/moleditpy_3d-molecule-on-2d?label=version)](https://github.com/HiroYokoyama/moleditpy_3d-molecule-on-2d/tags)
 
 ## Features
 
