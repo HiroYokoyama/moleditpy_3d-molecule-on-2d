@@ -5,6 +5,8 @@
 [![GitHub tag](https://img.shields.io/github/v/tag/HiroYokoyama/moleditpy_3d-molecule-on-2d?label=version)](https://github.com/HiroYokoyama/moleditpy_3d-molecule-on-2d/tags)
 [![GitHub Downloads](https://img.shields.io/github/downloads/HiroYokoyama/moleditpy_3d-molecule-on-2d/total)](https://github.com/HiroYokoyama/moleditpy_3d-molecule-on-2d/releases)
 
+Repo: [https://github.com/HiroYokoyama/moleditpy_3d-molecule-on-2d/](https://github.com/HiroYokoyama/moleditpy_3d-molecule-on-2d/)
+
 This plugin enhances MoleditPy with integrated 3D depth cues, interactive 3D rotation within the 2D view, and 3D-aware data export.
 
 ![Plugin Preview](img/main.png)
