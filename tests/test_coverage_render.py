@@ -228,6 +228,17 @@ class TestPaintPatches(unittest.TestCase):
         self.pkg.patched_atom_paint(item, MagicMock(), MagicMock(), MagicMock())
         original.assert_called_once()
 
+    def test_paint_patches_accept_omitted_widget(self):
+        # The host's TemplatePreviewItem.paint_ghost calls paint(painter, option)
+        self.pkg._original_atom_paint = MagicMock()
+        self.pkg._original_bond_paint = MagicMock()
+        a1, a2 = AtomItem(1), AtomItem(2)
+        a1.z_3d = None
+        self.pkg.patched_atom_paint(a1, MagicMock(), MagicMock())
+        bond = BondItem(a1, a2)
+        bond._scene = None
+        self.pkg.patched_bond_paint(bond, MagicMock(), MagicMock())
+
     def test_patched_bond_paint_no_original_returns(self):
         self.pkg._original_bond_paint = None
         a1, a2 = AtomItem(1), AtomItem(2)

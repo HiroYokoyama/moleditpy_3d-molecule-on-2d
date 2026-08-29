@@ -1062,7 +1062,7 @@ def patch_state_logic(active=True):
 # --- Patched Paint Methods ---
 
 
-def patched_atom_paint(self, painter, option, widget):
+def patched_atom_paint(self, painter, option, widget=None):
     from moleditpy.ui import atom_item
 
     if _show_depth_cues and getattr(self, "z_3d", None) is not None and self.scene():
@@ -1103,7 +1103,7 @@ def patched_atom_paint(self, painter, option, widget):
     _original_atom_paint(self, painter, option, widget)
 
 
-def patched_bond_paint(self, painter, option, widget):
+def patched_bond_paint(self, painter, option, widget=None):
     if _original_bond_paint is None:
         return
 
