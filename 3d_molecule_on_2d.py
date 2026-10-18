@@ -19,11 +19,8 @@ try:
     from rdkit.Geometry import Point3D
 except ImportError:
     pass
-try:
-    from PyQt6 import sip
-except ImportError:
-    import sip
-from PyQt6.QtWidgets import (
+import shiboken6
+from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
     QHBoxLayout,
@@ -35,8 +32,8 @@ from PyQt6.QtWidgets import (
     QSpacerItem,
     QSizePolicy,
 )
-from PyQt6.QtCore import Qt, QPointF, QEvent, QObject, QTimer, pyqtSignal, QThread
-from PyQt6.QtGui import QColor
+from PySide6.QtCore import Qt, QPointF, QEvent, QObject, QTimer, Signal, Slot, QThread
+from PySide6.QtGui import QColor
 import logging
 
 # Metadata
@@ -44,7 +41,7 @@ PLUGIN_NAME = "3D Molecule on 2D"
 PLUGIN_VERSION = "3.1.6"
 PLUGIN_AUTHOR = "HiroYokoyama"
 PLUGIN_DESCRIPTION = "Integrated 3D depth cues, rotation, and 3D-aware Mol export."
-PLUGIN_SUPPORTED_MOLEDITPY_VERSION = ">=4.0.0, <5.0.0"
+PLUGIN_SUPPORTED_MOLEDITPY_VERSION = ">=5.0.0a1, <6.0.0"
 
 
 _enabled = True
@@ -179,7 +176,7 @@ class PluginSettingsDialog(QDialog):
         )
         layout.addItem(spacer)
 
-        from PyQt6.QtWidgets import QDialogButtonBox
+        from PySide6.QtWidgets import QDialogButtonBox
 
         btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -728,7 +725,7 @@ def save_state():
                 item = mw.scene.atom_items.get(aid, None)
             else:
                 item = atom_data.get("item", None)
-            if item and not sip_isdeleted_safe(item) and hasattr(item, "z_3d"):
+            if item and not qt_isdeleted_safe(item) and hasattr(item, "z_3d"):
                 # Save raw pixels for Z to match X/Y persistence in the core app.
                 # This ensures that rotations and positions are saved 1:1 without scaling artifacts.
                 z_data[str(aid)] = item.z_3d
@@ -773,7 +770,7 @@ def load_state(data):
                     elif atom_data and "item" in atom_data:
                         item = atom_data["item"]
 
-                    if item and not sip_isdeleted_safe(item):
+                    if item and not qt_isdeleted_safe(item):
                         item.z_3d = z
                         item.setZValue(z)
                 except Exception:
@@ -884,7 +881,7 @@ def patched_to_rdkit_mol(self, use_2d_stereo=True):
                     item = _mw.scene.atom_items.get(aid, None)
                 else:
                     item = self.atoms[aid].get("item", None)
-                if item and not sip_isdeleted_safe(item) and hasattr(item, "z_3d"):
+                if item and not qt_isdeleted_safe(item) and hasattr(item, "z_3d"):
                     # Use current visual position (including rotation) for all coordinates
                     pos_item = item.pos()
                     ax = pos_item.x() / scale
@@ -965,7 +962,7 @@ def patched_get_current_state(self):
     scene = getattr(self.host, "scene", None)
     if scene is not None and getattr(scene, "atom_items", None):
         for aid, item in scene.atom_items.items():
-            if item is None or sip_isdeleted_safe(item):
+            if item is None or qt_isdeleted_safe(item):
                 continue
             if hasattr(item, "z_3d"):
                 z_data[str(aid)] = float(item.z_3d)
@@ -995,7 +992,7 @@ def patched_set_state_from_data(self, state_data):
         # carry the plugin's dynamically-added z_3d attribute. Guarding on it
         # skipped every atom and left the molecule flat after undo. z_data keys
         # are exactly the atoms that had depth, so assign it unconditionally.
-        if item is not None and not sip_isdeleted_safe(item):
+        if item is not None and not qt_isdeleted_safe(item):
             item.z_3d = float(z)
             item.setZValue(float(z))
 
@@ -1023,7 +1020,7 @@ def patched_set_state_from_data(self, state_data):
     # its items afterwards) has fully settled, so the final frame is correct.
     def _deferred_depth_refresh():
         try:
-            if sip_isdeleted_safe(scene):
+            if qt_isdeleted_safe(scene):
                 return
             update_molecule_z_ranges(scene)
             scene.update()
@@ -1159,7 +1156,7 @@ def get_scene_z_range(scene):
                 item = scene.atom_items.get(aid, None)
             else:
                 item = atom_data.get("item", None)
-            if item and not sip_isdeleted_safe(item) and hasattr(item, "z_3d"):
+            if item and not qt_isdeleted_safe(item) and hasattr(item, "z_3d"):
                 zs.append(item.z_3d)
     if not zs:
         return -5.0, 5.0
@@ -1173,7 +1170,7 @@ def find_molecules(scene):
     if not scene:
         return [], [], []
     for item in scene.items():
-        if sip_isdeleted_safe(item):
+        if qt_isdeleted_safe(item):
             continue
         cls_name = type(item).__name__
         if cls_name == "AtomItem":
@@ -1239,9 +1236,9 @@ def update_molecule_z_ranges(scene):
 
 
 class LocalCalculationWorker(QObject):
-    finished = pyqtSignal(object)
-    status = pyqtSignal(str)
-    error = pyqtSignal(str)
+    finished = Signal(object)
+    status = Signal(str)
+    error = Signal(str)
 
     def __init__(self, mol_block, embed_without_h, force_direct_mode, atom_ids):
         super().__init__()
@@ -1250,6 +1247,7 @@ class LocalCalculationWorker(QObject):
         self.force_direct_mode = force_direct_mode
         self.atom_ids = atom_ids
 
+    @Slot()
     def run(self):
         try:
             self.status.emit("Calculating 3D structure...")
@@ -1417,6 +1415,27 @@ class LocalCalculationWorker(QObject):
             self.error.emit(str(e))
 
 
+class _EmbeddingCallbacks(QObject):
+    """Deliver worker results to the thread which owns the GUI."""
+
+    def __init__(self, mw, status_callback):
+        super().__init__()
+        self.main_window = mw
+        self.status_callback = status_callback
+
+    @Slot(str)
+    def status(self, message):
+        self.status_callback(message)
+
+    @Slot(str)
+    def failed(self, message):
+        on_embedding_error(self.main_window, message)
+
+    @Slot(object)
+    def completed(self, molecule):
+        on_embedding_finished(self.main_window, molecule)
+
+
 def start_local_embedding(mw, embed_without_h=False, force_direct_mode=False):
     """
     Start local embedding in a background thread.
@@ -1437,9 +1456,7 @@ def start_local_embedding(mw, embed_without_h=False, force_direct_mode=False):
     worker = LocalCalculationWorker(
         mol_block, embed_without_h, force_direct_mode, atom_ids
     )
-    worker.moveToThread(thread)
 
-    _active_worker = (thread, worker)
 
     # Connect signals
     def update_ui_status(msg):
@@ -1458,14 +1475,17 @@ def start_local_embedding(mw, embed_without_h=False, force_direct_mode=False):
                 logging.warning("[3d_molecule_on_2d.py:1089] silenced: %s", _e)
 
     thread.started.connect(worker.run)
-    worker.status.connect(update_ui_status)
-    worker.error.connect(lambda msg: on_embedding_error(mw, msg))
-    worker.finished.connect(lambda mol: on_embedding_finished(mw, mol))
+    callbacks = _EmbeddingCallbacks(mw, update_ui_status)
+    _active_worker = (thread, worker, callbacks)
+    worker.status.connect(callbacks.status)
+    worker.error.connect(callbacks.failed)
+    worker.finished.connect(callbacks.completed)
 
     # Cleanup
     worker.finished.connect(thread.quit)
     worker.error.connect(thread.quit)
     thread.finished.connect(thread.deleteLater)
+    thread.finished.connect(callbacks.deleteLater)
     worker.finished.connect(worker.deleteLater)
     worker.error.connect(worker.deleteLater)
 
@@ -1480,7 +1500,7 @@ def start_local_embedding(mw, embed_without_h=False, force_direct_mode=False):
         try:
             mw.plotter.clear()
             bg_color_hex = mw.init_manager.settings.get("background_color", "#919191")
-            from PyQt6.QtGui import QColor
+            from PySide6.QtGui import QColor
 
             bg_qcolor = QColor(bg_color_hex)
             luminance = bg_qcolor.toHsl().lightness() if bg_qcolor.isValid() else 255
@@ -1498,6 +1518,7 @@ def start_local_embedding(mw, embed_without_h=False, force_direct_mode=False):
         except Exception as _e:
             logging.warning("[3d_molecule_on_2d.py:1127] silenced: %s", _e)
 
+    worker.moveToThread(thread)
     thread.start()
 
 
@@ -1732,7 +1753,7 @@ class RotateToolHandler(QObject):
         all_atoms = [
             i
             for i in self.mw.scene.items()
-            if type(i).__name__ == "AtomItem" and not sip_isdeleted_safe(i)
+            if type(i).__name__ == "AtomItem" and not qt_isdeleted_safe(i)
         ]
         for item in all_atoms:
             z = getattr(item, "z_3d", 0.0)
@@ -1869,8 +1890,8 @@ class RotateToolHandler(QObject):
         self.mw.scene.update()
 
 
-def sip_isdeleted_safe(obj):
+def qt_isdeleted_safe(obj):
     try:
-        return sip.isdeleted(obj)
+        return not shiboken6.isValid(obj)
     except:
         return False

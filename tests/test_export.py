@@ -4,8 +4,18 @@ import importlib
 import types
 from unittest.mock import MagicMock
 
-# Stub PyQt6.QtGui to bypass ModuleNotFoundError when importing moleditpy
-qt_gui = types.ModuleType("PyQt6.QtGui")
+try:
+    import PySide6.QtCore
+    import PySide6.QtGui
+    import PySide6.QtWidgets
+    import shiboken6
+    _real_qt = {name: module for name, module in sys.modules.items()
+                if name == "shiboken6" or name.startswith("PySide6")}
+except ImportError:
+    _real_qt = {}
+
+# Stub PySide6.QtGui to bypass ModuleNotFoundError when importing moleditpy
+qt_gui = types.ModuleType("PySide6.QtGui")
 
 
 class MockQColor:
@@ -37,14 +47,14 @@ class MockQFont:
 qt_gui.QColor = MockQColor
 qt_gui.QFont = MockQFont
 
-pyqt6 = types.ModuleType("PyQt6")
-pyqt6.QtGui = qt_gui
+pyside6 = types.ModuleType("PySide6")
+pyside6.QtGui = qt_gui
 sip_mock = MagicMock()
-sip_mock.isdeleted.return_value = False
-pyqt6.sip = sip_mock
-sys.modules["sip"] = sip_mock
+sip_mock.isValid.return_value = True
+pyside6.sip = sip_mock
+sys.modules["shiboken6"] = sip_mock
 
-qt_widgets = types.ModuleType("PyQt6.QtWidgets")
+qt_widgets = types.ModuleType("PySide6.QtWidgets")
 for name in [
     "QDialog",
     "QVBoxLayout",
@@ -58,18 +68,22 @@ for name in [
     "QSizePolicy",
 ]:
     setattr(qt_widgets, name, MagicMock)
-pyqt6.QtWidgets = qt_widgets
+pyside6.QtWidgets = qt_widgets
 
-qt_core = types.ModuleType("PyQt6.QtCore")
-for name in ["Qt", "QPointF", "QEvent", "QObject", "QTimer", "pyqtSignal", "QThread"]:
+qt_core = types.ModuleType("PySide6.QtCore")
+for name in ["Qt", "QPointF", "QEvent", "QObject", "QTimer", "Signal", "QThread"]:
     setattr(qt_core, name, MagicMock)
-pyqt6.QtCore = qt_core
+qt_core.Slot = lambda *args: (lambda fn: fn)
+pyside6.QtCore = qt_core
 
-sys.modules["PyQt6"] = pyqt6
-sys.modules["PyQt6.QtGui"] = qt_gui
-sys.modules["PyQt6.sip"] = pyqt6.sip
-sys.modules["PyQt6.QtWidgets"] = qt_widgets
-sys.modules["PyQt6.QtCore"] = qt_core
+sys.modules["PySide6"] = pyside6
+sys.modules["PySide6.QtGui"] = qt_gui
+sys.modules["PySide6.sip"] = pyside6.sip
+sys.modules["PySide6.QtWidgets"] = qt_widgets
+sys.modules["PySide6.QtCore"] = qt_core
+
+if _real_qt:
+    sys.modules.update(_real_qt)
 
 # Add core moleditpy source to path
 sys.path.insert(

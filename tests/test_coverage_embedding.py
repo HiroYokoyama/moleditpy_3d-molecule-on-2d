@@ -23,20 +23,20 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
-def _restore_real_pyqt6():
+def _restore_real_pyside6():
     to_remove = []
     for k, v in list(sys.modules.items()):
-        if k.startswith("PyQt6") or k in ("sip", "_3d_molecule_on_2d_embed"):
+        if k.startswith("PySide6") or k in ("shiboken6", "_3d_molecule_on_2d_embed"):
             if not hasattr(v, "__file__") or "mock" in str(type(v)).lower():
                 to_remove.append(k)
     for k in to_remove:
         del sys.modules[k]
 
 
-_restore_real_pyqt6()
+_restore_real_pyside6()
 
-from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import QPointF, QEvent, Qt, QEventLoop, QTimer
+from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QPointF, QEvent, Qt, QEventLoop, QTimer
 
 _PLUGIN_PATH = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "3d_molecule_on_2d.py")
@@ -44,7 +44,7 @@ _PLUGIN_PATH = os.path.normpath(
 
 
 def _load_plugin():
-    _restore_real_pyqt6()
+    _restore_real_pyside6()
     spec = importlib.util.spec_from_file_location(
         "_3d_molecule_on_2d_embed", _PLUGIN_PATH
     )

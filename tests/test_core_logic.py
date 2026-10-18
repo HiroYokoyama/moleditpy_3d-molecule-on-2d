@@ -18,12 +18,12 @@ sys.path.insert(
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 
-def _restore_real_pyqt6():
+def _restore_real_pyside6():
     import sys
 
     to_remove = []
     for k, v in list(sys.modules.items()):
-        if k.startswith("PyQt6") or k == "sip" or k == "_3d_molecule_on_2d":
+        if k.startswith("PySide6") or k == "shiboken6" or k == "_3d_molecule_on_2d":
             if (
                 not hasattr(v, "__file__")
                 or "mock" in str(type(v)).lower()
@@ -34,17 +34,17 @@ def _restore_real_pyqt6():
         del sys.modules[k]
 
 
-_restore_real_pyqt6()
+_restore_real_pyside6()
 
-# Check if real PyQt6 is available
+# Check if real PySide6 is available
 HAS_REAL_PYQT6 = False
-if "PyQt6" in sys.modules:
-    pyqt6_mod = sys.modules["PyQt6"]
-    if hasattr(pyqt6_mod, "__file__"):
+if "PySide6" in sys.modules:
+    pyside6_mod = sys.modules["PySide6"]
+    if hasattr(pyside6_mod, "__file__"):
         HAS_REAL_PYQT6 = True
 else:
     try:
-        import PyQt6
+        import PySide6
 
         HAS_REAL_PYQT6 = True
     except ImportError:
@@ -52,27 +52,29 @@ else:
 
 if not HAS_REAL_PYQT6:
     # Set up stubs so that importing the plugin doesn't fail on CI
-    if "sip" not in sys.modules:
-        sip_stub = types.ModuleType("sip")
-        sip_stub.isdeleted = lambda obj: False
-        sys.modules["sip"] = sip_stub
+    if "shiboken6" not in sys.modules:
+        sip_stub = types.ModuleType("shiboken6")
+        sip_stub.isValid = lambda obj: True
+        sys.modules["shiboken6"] = sip_stub
 
-    if "PyQt6" not in sys.modules:
-        pyqt6 = types.ModuleType("PyQt6")
+    if "PySide6" not in sys.modules:
+        pyside6 = types.ModuleType("PySide6")
 
-        qt_core = types.ModuleType("PyQt6.QtCore")
+        qt_core = types.ModuleType("PySide6.QtCore")
         for name in [
             "Qt",
             "QPointF",
             "QEvent",
             "QObject",
             "QTimer",
-            "pyqtSignal",
+            "Signal",
             "QThread",
         ]:
             setattr(qt_core, name, MagicMock)
 
-        qt_widgets = types.ModuleType("PyQt6.QtWidgets")
+        qt_core.Slot = lambda *args: (lambda fn: fn)
+
+        qt_widgets = types.ModuleType("PySide6.QtWidgets")
         for name in [
             "QDialog",
             "QVBoxLayout",
@@ -87,18 +89,18 @@ if not HAS_REAL_PYQT6:
         ]:
             setattr(qt_widgets, name, MagicMock)
 
-        qt_gui = types.ModuleType("PyQt6.QtGui")
+        qt_gui = types.ModuleType("PySide6.QtGui")
         qt_gui.QColor = MagicMock
 
-        pyqt6.QtCore = qt_core
-        pyqt6.QtWidgets = qt_widgets
-        pyqt6.QtGui = qt_gui
+        pyside6.QtCore = qt_core
+        pyside6.QtWidgets = qt_widgets
+        pyside6.QtGui = qt_gui
 
-        sys.modules["PyQt6"] = pyqt6
-        sys.modules["PyQt6.QtCore"] = qt_core
-        sys.modules["PyQt6.QtWidgets"] = qt_widgets
-        sys.modules["PyQt6.QtGui"] = qt_gui
-        sys.modules["PyQt6.sip"] = sip_stub
+        sys.modules["PySide6"] = pyside6
+        sys.modules["PySide6.QtCore"] = qt_core
+        sys.modules["PySide6.QtWidgets"] = qt_widgets
+        sys.modules["PySide6.QtGui"] = qt_gui
+        sys.modules["PySide6.sip"] = sip_stub
 
 # Import the plugin dynamically since its filename starts with a number
 _PLUGIN_PATH = os.path.normpath(
@@ -110,13 +112,13 @@ sys.modules["_3d_molecule_on_2d"] = _pkg
 _spec.loader.exec_module(_pkg)
 
 
-@unittest.skipUnless(HAS_REAL_PYQT6, "Requires real PyQt6 installed")
+@unittest.skipUnless(HAS_REAL_PYQT6, "Requires real PySide6 installed")
 class TestCoreLogic(unittest.TestCase):
     def setUp(self):
         if HAS_REAL_PYQT6:
-            # Restore real PyQt6 modules if they were stubbed by other tests
-            _restore_real_pyqt6()
-            # Re-import/reload the plugin to make sure it refers to real PyQt6 classes
+            # Restore real PySide6 modules if they were stubbed by other tests
+            _restore_real_pyside6()
+            # Re-import/reload the plugin to make sure it refers to real PySide6 classes
             global _pkg
             _spec = importlib.util.spec_from_file_location(
                 "_3d_molecule_on_2d", _PLUGIN_PATH
@@ -126,7 +128,7 @@ class TestCoreLogic(unittest.TestCase):
             _spec.loader.exec_module(_pkg)
 
     def test_blend_with_white(self):
-        from PyQt6.QtGui import QColor
+        from PySide6.QtGui import QColor
 
         # Test factor 0.0 (returns original color)
         c1 = QColor(100, 150, 200)
@@ -148,7 +150,7 @@ class TestCoreLogic(unittest.TestCase):
         self.assertAlmostEqual(res3.blue(), 227, delta=1)
 
     def test_local_calculation_worker(self):
-        from PyQt6.QtWidgets import QApplication
+        from PySide6.QtWidgets import QApplication
         from rdkit import Chem
         from rdkit.Chem import AllChem
 
@@ -210,12 +212,12 @@ class TestCoreLogic(unittest.TestCase):
         self.assertEqual(out_mol_direct.GetNumAtoms(), 2)
 
     def test_rotation_math(self):
-        from PyQt6.QtWidgets import QApplication
-        from PyQt6.QtCore import QPointF
+        from PySide6.QtWidgets import QApplication
+        from PySide6.QtCore import QPointF
 
         app = QApplication.instance() or QApplication([])
 
-        # Mock Atom Item that behaves like PyQt6 graphics item
+        # Mock Atom Item that behaves like PySide6 graphics item
         class MockAtomItem:
             def __init__(self, x, y, z, atom_id):
                 self._pos = QPointF(x, y)
