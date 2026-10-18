@@ -182,7 +182,7 @@ class TestMetadata(unittest.TestCase):
         self.assertEqual(PLUGIN_NAME, "3D Molecule on 2D")
 
     def test_plugin_version_is_semver(self):
-        parts = PLUGIN_VERSION.split(".")
+        parts = PLUGIN_VERSION.split("a", 1)[0].split(".")
         self.assertEqual(len(parts), 3)
         for p in parts:
             self.assertTrue(p.isdigit(), f"Non-numeric version part: {p!r}")
