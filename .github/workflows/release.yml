@@ -59,7 +59,7 @@ jobs:
           gh release create "v$TAG" \
             --title "3D Molecule on 2D $TAG" \
             --generate-notes \
-            3d_molecule_on_2d.py
+            3d_molecule_on_2d.py LICENSE COPYING LICENSING.md
 
       - name: Trigger moleditpy-plugins registry update
         if: success()
