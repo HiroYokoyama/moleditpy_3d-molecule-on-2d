@@ -5,10 +5,19 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
-  workflow_dispatch: 
+  workflow_dispatch:
+    inputs:
+      moleditpy_ref:
+        description: 'MoleditPy branch, tag, or full commit SHA (blank uses repository default)'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
+
+env:
+  MOLEDITPY_REF: ${{ inputs.moleditpy_ref || vars.MOLEDITPY_REF || 'migrate/pyside6-without-openbabel' }}
 
 jobs:
   test:
@@ -27,17 +36,22 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install pytest rdkit PyQt6
+        pip install pytest rdkit PySide6-Essentials
 
     - name: Clone main MoleditPy application
+      shell: bash
       run: |
-        git clone --depth 1           https://github.com/HiroYokoyama/python_molecular_editor.git           python_molecular_editor
+        git init "python_molecular_editor"
+        git -C "python_molecular_editor" remote add origin https://github.com/HiroYokoyama/python_molecular_editor.git
+        git -C "python_molecular_editor" fetch --depth 1 origin "$MOLEDITPY_REF"
+        git -C "python_molecular_editor" checkout --detach FETCH_HEAD
+        git -C "python_molecular_editor" log -1 --format="%H %s"
 
     - name: Run test suite
       env:
         MOLEDITPY_HEADLESS: "1"
         QT_QPA_PLATFORM: "offscreen"
-        PYTEST_QT_API: "pyqt6"
+        PYTEST_QT_API: "pyside6"
       run: |
         cd moleditpy_3d-molecule-on-2d
         python -m pytest tests/ -v

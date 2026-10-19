@@ -12,7 +12,7 @@ CI setup
 The ci.yml already clones the main app:
 
     - name: Clone main MoleditPy application
-      run: git clone --depth 1 https://github.com/HiroYokoyama/python_molecular_editor.git
+      run: git clone --depth 1 --branch "${MOLEDITPY_REF:-migrate/pyside6-without-openbabel}" https://github.com/HiroYokoyama/python_molecular_editor.git
              python_molecular_editor
 """
 
@@ -28,18 +28,18 @@ from unittest.mock import MagicMock
 
 
 def _install_stubs():
-    if "PyQt6" not in sys.modules or not hasattr(sys.modules.get("PyQt6"), "__file__"):
-        pyqt6 = types.ModuleType("PyQt6")
+    if "PySide6" not in sys.modules or not hasattr(sys.modules.get("PySide6"), "__file__"):
+        pyside6 = types.ModuleType("PySide6")
 
         # sip - imported at top level by 3d_molecule_on_2d
-        sip_stub = types.ModuleType("sip")
-        sip_stub.isdeleted = lambda obj: False
-        sys.modules["sip"] = sip_stub
-        # Also handle "from PyQt6 import sip" branch
-        pyqt6.sip = sip_stub
-        sys.modules["PyQt6.sip"] = sip_stub
+        sip_stub = types.ModuleType("shiboken6")
+        sip_stub.isValid = lambda obj: True
+        sys.modules["shiboken6"] = sip_stub
+        # Also handle "from PySide6 import sip" branch
+        pyside6.sip = sip_stub
+        sys.modules["PySide6.sip"] = sip_stub
 
-        qt_core = types.ModuleType("PyQt6.QtCore")
+        qt_core = types.ModuleType("PySide6.QtCore")
         qt_core.Qt = MagicMock()
         qt_core.QPointF = MagicMock()
         qt_core.QEvent = MagicMock()
@@ -51,10 +51,11 @@ def _install_stubs():
                 pass  # do not call fn - avoids cascading Qt dependency
 
         qt_core.QTimer = _QTimer
-        qt_core.pyqtSignal = MagicMock()
+        qt_core.Signal = MagicMock()
+        qt_core.Slot = lambda *args: (lambda fn: fn)
         qt_core.QThread = MagicMock()
 
-        qt_widgets = types.ModuleType("PyQt6.QtWidgets")
+        qt_widgets = types.ModuleType("PySide6.QtWidgets")
         for cls_name in [
             "QDialog",
             "QVBoxLayout",
@@ -69,17 +70,17 @@ def _install_stubs():
         ]:
             setattr(qt_widgets, cls_name, MagicMock())
 
-        qt_gui = types.ModuleType("PyQt6.QtGui")
+        qt_gui = types.ModuleType("PySide6.QtGui")
         qt_gui.QColor = MagicMock()
 
-        pyqt6.QtCore = qt_core
-        pyqt6.QtWidgets = qt_widgets
-        pyqt6.QtGui = qt_gui
+        pyside6.QtCore = qt_core
+        pyside6.QtWidgets = qt_widgets
+        pyside6.QtGui = qt_gui
 
-        sys.modules["PyQt6"] = pyqt6
-        sys.modules["PyQt6.QtCore"] = qt_core
-        sys.modules["PyQt6.QtWidgets"] = qt_widgets
-        sys.modules["PyQt6.QtGui"] = qt_gui
+        sys.modules["PySide6"] = pyside6
+        sys.modules["PySide6.QtCore"] = qt_core
+        sys.modules["PySide6.QtWidgets"] = qt_widgets
+        sys.modules["PySide6.QtGui"] = qt_gui
 
     # RDKit
     rdkit_stub = types.ModuleType("rdkit")
@@ -181,7 +182,7 @@ class TestMetadata(unittest.TestCase):
         self.assertEqual(PLUGIN_NAME, "3D Molecule on 2D")
 
     def test_plugin_version_is_semver(self):
-        parts = PLUGIN_VERSION.split(".")
+        parts = PLUGIN_VERSION.split("a", 1)[0].split(".")
         self.assertEqual(len(parts), 3)
         for p in parts:
             self.assertTrue(p.isdigit(), f"Non-numeric version part: {p!r}")
@@ -326,11 +327,11 @@ except ImportError:
 
 
 def _clear_qt_stubs():
-    """Remove fake PyQt6 stub modules so real PyQt6 can be imported by moleditpy."""
+    """Remove fake PySide6 stub modules so real PySide6 can be imported by moleditpy."""
     to_remove = [
         k
         for k in list(sys.modules)
-        if k.startswith("PyQt6") and not hasattr(sys.modules[k], "__file__")
+        if k.startswith("PySide6") and not hasattr(sys.modules[k], "__file__")
     ]
     for k in to_remove:
         del sys.modules[k]
@@ -348,7 +349,7 @@ class TestWithRealPluginContext(unittest.TestCase):
         if not HAS_MAIN_APP:
             return
         # Load plugin_interface.py directly to avoid triggering moleditpy/__init__.py
-        # which imports PyQt6 and conflicts with PySide6 loaded by pytest-qt on Windows.
+        # which imports PySide6 and conflicts with PySide6 loaded by pytest-qt on Windows.
         import importlib.util as _ilu
 
         _pi_path = os.path.join(

@@ -22,22 +22,22 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
-def _restore_real_pyqt6():
-    """Undo any PyQt6/sip stubbing left behind by other test modules (e.g.
-    test_export.py replaces PyQt6.QtCore with a bare MagicMock module that
+def _restore_real_pyside6():
+    """Undo any PySide6/sip stubbing left behind by other test modules (e.g.
+    test_export.py replaces PySide6.QtCore with a bare MagicMock module that
     lacks real symbols like QRectF); tests here need the genuine bindings."""
     to_remove = []
     for k, v in list(sys.modules.items()):
-        if k.startswith("PyQt6") or k in ("sip", "_3d_molecule_on_2d_render"):
+        if k.startswith("PySide6") or k in ("shiboken6", "_3d_molecule_on_2d_render"):
             if not hasattr(v, "__file__") or "mock" in str(type(v)).lower():
                 to_remove.append(k)
     for k in to_remove:
         del sys.modules[k]
 
 
-_restore_real_pyqt6()
+_restore_real_pyside6()
 
-from PyQt6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication
 
 _PLUGIN_PATH = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "3d_molecule_on_2d.py")
@@ -45,7 +45,7 @@ _PLUGIN_PATH = os.path.normpath(
 
 
 def _load_plugin():
-    _restore_real_pyqt6()
+    _restore_real_pyside6()
     spec = importlib.util.spec_from_file_location(
         "_3d_molecule_on_2d_render", _PLUGIN_PATH
     )
@@ -154,7 +154,7 @@ class TestFindMolecules(unittest.TestCase):
 
     def test_deleted_items_skipped(self):
         a1 = AtomItem(1)
-        self.pkg.sip_isdeleted_safe = lambda item: item is a1
+        self.pkg.qt_isdeleted_safe = lambda item: item is a1
         scene = FakeScene(items=[a1])
         molecules, all_atoms, all_bonds = self.pkg.find_molecules(scene)
         self.assertEqual(all_atoms, [])
@@ -196,12 +196,12 @@ class TestPaintPatches(unittest.TestCase):
         original.assert_called_once()
 
     def test_patched_atom_paint_depth_cue_applied(self):
-        _restore_real_pyqt6()
+        _restore_real_pyside6()
         from moleditpy.ui import atom_item
-        from PyQt6.QtGui import QColor
+        from PySide6.QtGui import QColor
 
         # Other test modules may have left CPK_COLORS["C"] pointing at a mock
-        # QColor from a stubbed PyQt6; force a known-good real QColor so the
+        # QColor from a stubbed PySide6; force a known-good real QColor so the
         # blend/restore path under test behaves deterministically.
         known_color = QColor(200, 200, 200)
         atom_item.CPK_COLORS["C"] = known_color
@@ -325,7 +325,7 @@ class TestToggleMonkeyPatchesRealClasses(unittest.TestCase):
     moleditpy classes (available since the main app repo is a sibling)."""
 
     def setUp(self):
-        _restore_real_pyqt6()
+        _restore_real_pyside6()
         self.app = QApplication.instance() or QApplication([])
         self.pkg = _load_plugin()
         # Some other test module may have left a patch installed (and never
@@ -402,20 +402,17 @@ class TestSipIsdeletedSafe(unittest.TestCase):
         self.pkg = _load_plugin()
 
     def test_returns_false_on_exception(self):
-        try:
-            from PyQt6 import sip
-        except ImportError:
-            import sip
+        import shiboken6
 
-        old = sip.isdeleted
+        old = shiboken6.isValid
         try:
-            sip.isdeleted = lambda obj: (_ for _ in ()).throw(RuntimeError("boom"))
-            self.assertFalse(self.pkg.sip_isdeleted_safe(object()))
+            shiboken6.isValid = lambda obj: (_ for _ in ()).throw(RuntimeError("boom"))
+            self.assertFalse(self.pkg.qt_isdeleted_safe(object()))
         finally:
-            sip.isdeleted = old
+            shiboken6.isValid = old
 
     def test_returns_actual_value(self):
-        self.assertFalse(self.pkg.sip_isdeleted_safe(object()))
+        self.assertFalse(self.pkg.qt_isdeleted_safe(object()))
 
 
 if __name__ == "__main__":

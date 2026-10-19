@@ -1,7 +1,7 @@
 """
 Coverage-focused tests for 3d_molecule_on_2d.py: settings persistence, the
 settings dialog, the smart-cleanup trigger, plugin enable/disable/toolbar
-wiring, undo/redo hooks, and save/load state. Uses real PyQt6 + real RDKit
+wiring, undo/redo hooks, and save/load state. Uses real PySide6 + real RDKit
 (as installed in CI); only the moleditpy host objects are mocked.
 """
 
@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication
 
 _PLUGIN_PATH = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "3d_molecule_on_2d.py")
