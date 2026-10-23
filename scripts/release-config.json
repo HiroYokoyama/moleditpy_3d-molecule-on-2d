@@ -1,0 +1,10 @@
+{
+  "source": "3d_molecule_on_2d.py",
+  "title": "3D Molecule on 2D",
+  "assets": [
+    "3d_molecule_on_2d.py",
+    "LICENSE",
+    "COPYING",
+    "LICENSING.md"
+  ]
+}
