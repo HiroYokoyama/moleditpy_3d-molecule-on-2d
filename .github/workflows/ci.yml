@@ -25,6 +25,10 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-latest, macos-latest]
+        python: ["3.13"]
+        include:
+          - os: macos-15-intel
+            python: "3.9"
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -32,10 +36,10 @@ jobs:
       with:
         path: moleditpy_3d-molecule-on-2d
 
-    - name: Set up Python 3.13
+    - name: Set up Python ${{ matrix.python }}
       uses: actions/setup-python@v5
       with:
-        python-version: "3.13"
+        python-version: ${{ matrix.python }}
 
     - name: Install dependencies
       run: |
@@ -59,3 +63,12 @@ jobs:
       run: |
         cd moleditpy_3d-molecule-on-2d
         python -m pytest tests/ -v
+
+    - name: Exercise normal clicks through real host scene and view
+      env:
+        MOLEDITPY_HEADLESS: "1"
+        QT_QPA_PLATFORM: "offscreen"
+        PYTEST_QT_API: "pyside6"
+      run: |
+        cd moleditpy_3d-molecule-on-2d
+        python -X faulthandler tests/native_click_scenario.py --check-native

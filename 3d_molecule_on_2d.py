@@ -26,7 +26,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QSlider,
-    QGraphicsItem,
     QCheckBox,
     QFrame,
     QSpacerItem,
@@ -38,7 +37,7 @@ import logging
 
 # Metadata
 PLUGIN_NAME = "3D Molecule on 2D"
-PLUGIN_VERSION = "4.0.1"
+PLUGIN_VERSION = "4.0.2"
 PLUGIN_AUTHOR = "HiroYokoyama"
 PLUGIN_DESCRIPTION = "Integrated 3D depth cues, rotation, and 3D-aware Mol export."
 PLUGIN_SUPPORTED_MOLEDITPY_VERSION = ">=5.0.0, <6.0.0"
@@ -471,9 +470,8 @@ def enable_plugin(mw, context):
     configure_actions()
 
     if mw.scene:
-        for item in mw.scene.items():
-            if type(item).__name__ in ["AtomItem", "BondItem"]:
-                item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+        # Rotation uses explicit setPos calls in our viewport filter. Preserve
+        # the host's interaction flags for ordinary selection and drawing.
         mw.scene.update()
 
 
@@ -787,7 +785,6 @@ def load_state(data):
         # Phase 3: Refresh all bonds and Z-order
         _, _, all_bonds = find_molecules(mw.scene)
         for bond in all_bonds:
-            # bond.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
             if hasattr(bond, "update_position"):
                 bond.update_position()
             if hasattr(bond.atom1, "z_3d") and hasattr(bond.atom2, "z_3d"):
@@ -838,15 +835,6 @@ def toggle_monkey_patches(active, mw=None):
             )
             MainWindowCompute.on_calculation_finished = patched_on_calculation_finished
 
-            # Veto ItemPositionChange if it doesn't come from programmatic setPos
-            if not hasattr(BondItem, "_original_itemChange"):
-                BondItem._original_itemChange = BondItem.itemChange
-
-                def bond_item_change_guarded(self, change, value):
-                    return BondItem._original_itemChange(self, change, value)
-
-                BondItem.itemChange = bond_item_change_guarded
-
     else:
         from moleditpy.ui.compute_logic import ComputeManager as MainWindowCompute
 
@@ -864,8 +852,10 @@ def toggle_monkey_patches(active, mw=None):
             _original_bond_paint = None
 
 
-def patched_to_rdkit_mol(self, use_2d_stereo=True):
-    mol = self._original_to_rdkit_mol(use_2d_stereo)
+def patched_to_rdkit_mol(self, *args, **kwargs):
+    # Preserve the host's full API, including use_rs_labels used by ordinary
+    # canvas updates. Exceptions escaping a Qt mouse handler are unsafe.
+    mol = self._original_to_rdkit_mol(*args, **kwargs)
     # Only apply Z/XYZ overrides if an export is explicitly in progress
     if _export_in_progress and mol and mol.GetNumConformers() > 0:
         conf = mol.GetConformer()
