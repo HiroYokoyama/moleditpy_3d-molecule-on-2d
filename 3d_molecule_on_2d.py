@@ -63,6 +63,8 @@ _original_atom_paint = None
 _original_bond_paint = None
 _original_save_as_mol = None
 _toolbar_actions_objs = []
+_configured_rotate_action = None
+_rotate_action_connection = None
 _export_in_progress = False
 _plugin_triggered_conversion = False
 _last_cleanup_trigger_time = 0
@@ -502,6 +504,7 @@ def _find_menu_action(mw, text):
 
 
 def disable_plugin(mw):
+    _release_rotate_action()
     toggle_monkey_patches(False, mw)
     patch_export_logic(False)
     patch_state_logic(False)
@@ -532,6 +535,22 @@ def disable_plugin(mw):
         mw.scene.update()
 
 
+def _release_rotate_action():
+    """Retire only our connection when an action leaves the toolbar."""
+    global _configured_rotate_action, _rotate_action_connection
+    action = _configured_rotate_action
+    if action is not None and not qt_isdeleted_safe(action):
+        if _rotate_action_connection is not None:
+            QObject.disconnect(_rotate_action_connection)
+        group = action.actionGroup()
+        if group is not None:
+            group.removeAction(action)
+    _configured_rotate_action = None
+    _rotate_action_connection = None
+    if _rotate_tool_handler:
+        _rotate_tool_handler.rotate_act = None
+
+
 def refresh_plugin_toolbar(mw, context):
     tb = getattr(getattr(mw, "init_manager", None), "plugin_toolbar", None)
     if not tb:
@@ -546,11 +565,13 @@ def refresh_plugin_toolbar(mw, context):
 
 
 def configure_actions():
-    global _toolbar_actions_objs
+    global _toolbar_actions_objs, _configured_rotate_action, _rotate_action_connection
 
     mw = _mw
     tb = getattr(getattr(mw, "init_manager", None), "plugin_toolbar", None)
     if not tb:
+        _toolbar_actions_objs = []
+        _release_rotate_action()
         return
 
     # Filter for our actions in the toolbar
@@ -560,51 +581,34 @@ def configure_actions():
         if a.text() in ["Clean Up 3D", "Rotate 3D", "3D on 2D Settings..."]
     ]
 
-    # Only update our global list if we found them (to avoid clearing it when plugin is disabled)
-    if found_actions:
-        _toolbar_actions_objs = found_actions
-
-    actions = _toolbar_actions_objs
-    if not actions:
-        return
-
-    rotate_act = next((a for a in actions if a.text() == "Rotate 3D"), None)
-    cleanup_act = next((a for a in actions if a.text() == "Clean Up 3D"), None)
-    next((a for a in actions if a.text() == "3D on 2D Settings..."), None)
+    # Toolbar rebuilds may destroy actions. Never fall back to cached wrappers.
+    _toolbar_actions_objs = found_actions
+    rotate_act = next((a for a in found_actions if a.text() == "Rotate 3D"), None)
+    if rotate_act is not _configured_rotate_action:
+        _release_rotate_action()
 
     # Set Checkable and connect toggled
     if rotate_act:
         rotate_act.setCheckable(True)
-        try:
-            rotate_act.toggled.disconnect()
-        except Exception as _e:
-            logging.debug("[3d_molecule_on_2d.py:474] silenced: %s", _e)
-        rotate_act.toggled.connect(on_rotate_toggled)
+        if _rotate_action_connection is None:
+            _rotate_action_connection = rotate_act.toggled.connect(on_rotate_toggled)
+            _configured_rotate_action = rotate_act
         if _rotate_tool_handler:
             _rotate_tool_handler.rotate_act = rotate_act
 
-    # Clean Up 3D must be (re)connected here too. The toolbar is rebuilt on
-    # every refresh_plugin_toolbar, which leaves the action without a live
-    # trigger connection — so clicking it did nothing. Rebind it to the handler
-    # (disconnect first to avoid double-firing).
-    if cleanup_act:
-        try:
-            cleanup_act.triggered.disconnect()
-        except (TypeError, RuntimeError) as _e:
-            logging.debug("[3d_molecule_on_2d] cleanup disconnect: %s", _e)
-        cleanup_act.triggered.connect(on_cleanup_triggered)
+    # The host connects Clean Up 3D's registered callback on every rebuild.
+    # Preserve its error-handling wrapper and any other plugins' listeners.
 
     # Mode Integration: Add Rotate 3D to main tool group for exclusivity
-    if rotate_act and hasattr(mw, "tool_group"):
-        if rotate_act not in mw.tool_group.actions():
-            mw.tool_group.addAction(rotate_act)
+    if (
+        rotate_act
+        and hasattr(mw, "tool_group")
+        and rotate_act not in mw.tool_group.actions()
+    ):
+        mw.tool_group.addAction(rotate_act)
 
-    # Visual Grouping (Separators)
-    if rotate_act and cleanup_act and not any(a.isSeparator() for a in tb.actions()):
-        # This is a bit naive but tries to add separators
-        pass
-
-    tb.show()
+    if found_actions:
+        tb.show()
 
 
 def _restore_depth_after_undo():

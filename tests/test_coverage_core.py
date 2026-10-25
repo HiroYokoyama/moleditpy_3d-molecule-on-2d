@@ -5,13 +5,12 @@ wiring, undo/redo hooks, and save/load state. Uses real PySide6 + real RDKit
 (as installed in CI); only the moleditpy host objects are mocked.
 """
 
+import importlib.util
 import os
 import sys
-import json
 import time
-import warnings
-import importlib.util
 import unittest
+import warnings
 from unittest.mock import MagicMock
 
 sys.path.insert(
@@ -26,10 +25,11 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QToolBar
-from PySide6.QtGui import QAction, QActionGroup
 from types import SimpleNamespace
+
 import shiboken6
+from PySide6.QtGui import QAction, QActionGroup
+from PySide6.QtWidgets import QApplication, QToolBar
 
 _PLUGIN_PATH = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "3d_molecule_on_2d.py")
