@@ -380,6 +380,21 @@ class TestToggleMonkeyPatchesRealClasses(unittest.TestCase):
         self.assertIs(MolecularData.to_rdkit_mol, orig_to_rdkit)
         self.assertIs(MolecularData.to_mol_block, orig_to_mol_block)
 
+    def test_rdkit_wrapper_preserves_host_positional_and_keyword_arguments(self):
+        from types import SimpleNamespace
+
+        original = MagicMock(return_value=None)
+        data = SimpleNamespace(_original_to_rdkit_mol=original)
+        self.pkg.patched_to_rdkit_mol(data, False, use_rs_labels=False)
+        original.assert_called_once_with(False, use_rs_labels=False)
+
+    def test_rdkit_wrapper_preserves_host_defaults(self):
+        from types import SimpleNamespace
+
+        original = MagicMock(return_value=None)
+        self.pkg.patched_to_rdkit_mol(SimpleNamespace(_original_to_rdkit_mol=original))
+        original.assert_called_once_with()
+
     def test_patch_state_logic_install_and_restore(self):
         from moleditpy.ui.app_state import StateManager
 

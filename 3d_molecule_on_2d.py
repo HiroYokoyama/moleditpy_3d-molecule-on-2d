@@ -852,8 +852,10 @@ def toggle_monkey_patches(active, mw=None):
             _original_bond_paint = None
 
 
-def patched_to_rdkit_mol(self, use_2d_stereo=True):
-    mol = self._original_to_rdkit_mol(use_2d_stereo)
+def patched_to_rdkit_mol(self, *args, **kwargs):
+    # Preserve the host's full API, including use_rs_labels used by ordinary
+    # canvas updates. Exceptions escaping a Qt mouse handler are unsafe.
+    mol = self._original_to_rdkit_mol(*args, **kwargs)
     # Only apply Z/XYZ overrides if an export is explicitly in progress
     if _export_in_progress and mol and mol.GetNumConformers() > 0:
         conf = mol.GetConformer()

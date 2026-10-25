@@ -19,6 +19,15 @@ from moleditpy.ui.molecule_scene import MoleculeScene
 from moleditpy.ui.zoomable_view import ZoomableView
 
 app = QApplication([])
+event_errors = []
+
+
+def record_event_error(kind, value, traceback):
+    event_errors.append(value)
+    sys.__excepthook__(kind, value, traceback)
+
+
+sys.excepthook = record_event_error
 window = QMainWindow()
 window.init_manager = SimpleNamespace(settings={})
 window.ui_manager = SimpleNamespace(is_2d_editable=True)
@@ -56,6 +65,13 @@ try:
         assert len(scene.atom_items) >= 2
         atoms = list(scene.atom_items.values())
         scene.create_bond(atoms[0], atoms[1])
+        # Adding an atom to a bonded scene exercises the host's
+        # to_rdkit_mol(use_rs_labels=False) call from mouseReleaseEvent.
+        QTest.mouseClick(
+            view.viewport(), Qt.MouseButton.LeftButton,
+            pos=view.mapFromScene(QPointF(150, 50 + cycle * 25)),
+        )
+        assert not event_errors, event_errors
         bond = next(iter(scene.bond_items.values()))
         if "--check-native" in sys.argv:
             assert not bond.flags() & bond.GraphicsItemFlag.ItemIsMovable
@@ -73,6 +89,7 @@ try:
         if "--check-native" in sys.argv:
             assert BondItem.itemChange is original_item_change
     assert AtomItem.paint is not plugin.patched_atom_paint
+    assert not event_errors, event_errors
 finally:
     plugin.disable_plugin(window)
     window.close()
