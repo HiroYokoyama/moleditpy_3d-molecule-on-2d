@@ -64,6 +64,11 @@ try:
             for point in (QPointF(-70, 0), QPointF(0, 0), QPointF(160, 80)):
                 QTest.mouseClick(view.viewport(), Qt.MouseButton.LeftButton, pos=view.mapFromScene(point))
             app.processEvents()
+        # Explicit plugin rotation must work without making bond items movable.
+        before = atoms[0].pos()
+        plugin._rotate_tool_handler.target_atoms = atoms[:2]
+        plugin._rotate_tool_handler.rotate_molecule(0.4, 0.2)
+        assert atoms[0].pos() != before
         plugin.disable_plugin(window)
         if "--check-native" in sys.argv:
             assert BondItem.itemChange is original_item_change
