@@ -9,6 +9,7 @@ import os
 import sys
 import json
 import time
+import warnings
 import importlib.util
 import unittest
 from unittest.mock import MagicMock
@@ -25,7 +26,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QToolBar
+from PySide6.QtGui import QAction, QActionGroup
+from types import SimpleNamespace
+import shiboken6
 
 _PLUGIN_PATH = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "3d_molecule_on_2d.py")
@@ -525,11 +529,11 @@ class TestToolbarConfig(unittest.TestCase):
         self.pkg.configure_actions()
         rotate_act.setCheckable.assert_called_with(True)
         rotate_act.toggled.connect.assert_called_with(self.pkg.on_rotate_toggled)
-        cleanup_act.triggered.connect.assert_called_with(self.pkg.on_cleanup_triggered)
+        cleanup_act.triggered.disconnect.assert_not_called()
         mw.tool_group.addAction.assert_called_with(rotate_act)
         tb.show.assert_called()
 
-    def test_configure_actions_no_found_actions_uses_cached(self):
+    def test_configure_actions_no_found_actions_returns(self):
         mw = MagicMock()
         tb = MagicMock()
         tb.actions.return_value = []
@@ -537,6 +541,69 @@ class TestToolbarConfig(unittest.TestCase):
         self.pkg._mw = mw
         self.pkg._toolbar_actions_objs = []
         self.pkg.configure_actions()  # falls through with no actions, no crash
+
+    def real_toolbar(self):
+        self.toolbar = QToolBar()
+        self.group = QActionGroup(self.toolbar)
+        self.pkg._mw = SimpleNamespace(
+            init_manager=SimpleNamespace(plugin_toolbar=self.toolbar),
+            tool_group=self.group,
+        )
+        self.pkg._rotate_tool_handler = SimpleNamespace(rotate_act=None)
+        self.pkg.on_rotate_toggled = MagicMock()
+        self.pkg.on_cleanup_triggered = MagicMock()
+
+    def add_actions(self):
+        rotate = QAction("Rotate 3D", self.toolbar)
+        cleanup = QAction("Clean Up 3D", self.toolbar)
+        # The host owns this connection, including its safe callback wrapper.
+        cleanup.triggered.connect(self.pkg.on_cleanup_triggered)
+        self.toolbar.addAction(rotate)
+        self.toolbar.addAction(cleanup)
+        return rotate, cleanup
+
+    def test_real_actions_configure_without_warnings_or_duplicate_callbacks(self):
+        self.real_toolbar()
+        rotate, cleanup = self.add_actions()
+        observer = MagicMock()
+        rotate.toggled.connect(observer)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            self.pkg.configure_actions()
+            self.pkg.configure_actions()
+        rotate.setChecked(True)
+        cleanup.trigger()
+        self.pkg.on_rotate_toggled.assert_called_once_with(True)
+        self.pkg.on_cleanup_triggered.assert_called_once()
+        observer.assert_called_once_with(True)
+
+    def test_rebuild_retires_old_action_and_preserves_other_listeners(self):
+        self.real_toolbar()
+        old_rotate, _ = self.add_actions()
+        self.pkg.configure_actions()
+        observer = MagicMock()
+        old_rotate.toggled.connect(observer)
+        self.toolbar.clear()
+        rotate, cleanup = self.add_actions()
+        self.pkg.configure_actions()
+        self.assertEqual(self.group.actions(), [rotate])
+        old_rotate.setChecked(True)
+        observer.assert_called_once_with(True)
+        self.pkg.on_rotate_toggled.assert_not_called()
+        rotate.setChecked(True)
+        cleanup.trigger()
+        self.pkg.on_rotate_toggled.assert_called_once_with(True)
+        self.pkg.on_cleanup_triggered.assert_called_once()
+
+    def test_deleted_cached_actions_are_not_reused(self):
+        self.real_toolbar()
+        rotate, cleanup = self.add_actions()
+        self.pkg.configure_actions()
+        shiboken6.delete(rotate)
+        shiboken6.delete(cleanup)
+        self.pkg.configure_actions()
+        self.assertEqual(self.pkg._toolbar_actions_objs, [])
+        self.assertIsNone(self.pkg._rotate_tool_handler.rotate_act)
 
 
 class TestUndoRedoHook(unittest.TestCase):
